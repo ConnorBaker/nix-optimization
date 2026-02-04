@@ -233,6 +233,8 @@ lib.makeOverridable (
         # since only the local store will be guaranteed to have it. Alternatively use fetchFromGitHub.
         # The local machine is fine since that's the one we're doing profiling on anyway.
         # TODO: Could create a dummy store for the evaluation to test copying/store operations (still wouldn't test daemon).
+        # TODO: Find out whether (since we're using many profiled libraries) they clobber eachother or what:
+        # https://clang.llvm.org/docs/UsersManual.html#profiling-with-instrumentation
         nix-eval-system-closures-profraw =
           pkgs.runCommandLocal "nix${suffix}-eval-system-closures.profraw"
             {

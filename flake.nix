@@ -43,6 +43,74 @@
               };
             in
             {
+              gcc =
+                (inputs.nix.lib.makeComponents {
+                  inherit pkgs;
+                  getStdenv = builtins.getAttr "stdenv";
+                }).overrideScope
+                  (
+                    final: prev: {
+                      # Copied from DetSys Nix's packaging/dependencies.nix, using the version of Rust available upstream.
+                      wasmtime =
+                        let
+                          wastimePath = inputs.nix.outPath + "/packaging/wasmtime.nix";
+                        in
+                        lib.optionalAttrs (lib.pathExists wastimePath) (
+                          pkgs.callPackage (inputs.nix.outPath + "/packaging/wasmtime.nix") {
+                            rust_1_89 = pkgs.rust_1_92;
+                          }
+                        );
+
+                      # Copied from DetSys Nix's packaging/dependencies.nix
+                      boehmgc = pkgs.boehmgc.override {
+                        enableLargeConfig = true;
+                        # Increase the initial mark stack size to avoid stack
+                        # overflows, since these inhibit parallel marking (see
+                        # GC_mark_some()). To check whether the mark stack is too
+                        # small, run Nix with GC_PRINT_STATS=1 and look for messages
+                        # such as `Mark stack overflow`, `No room to copy back mark
+                        # stack`, and `Grew mark stack to ... frames`.
+                        initialMarkStackSize = "1048576";
+                        # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
+                        stdenv = pkgs.clangStdenv;
+                      };
+                    }
+                  );
+
+              clang =
+                (inputs.nix.lib.makeComponents {
+                  inherit pkgs;
+                  getStdenv = builtins.getAttr "clangStdenv";
+                }).overrideScope
+                  (
+                    final: prev: {
+                      # Copied from DetSys Nix's packaging/dependencies.nix, using the version of Rust available upstream.
+                      wasmtime =
+                        let
+                          wastimePath = inputs.nix.outPath + "/packaging/wasmtime.nix";
+                        in
+                        lib.optionalAttrs (lib.pathExists wastimePath) (
+                          pkgs.callPackage (inputs.nix.outPath + "/packaging/wasmtime.nix") {
+                            rust_1_89 = pkgs.rust_1_92;
+                          }
+                        );
+
+                      # Copied from DetSys Nix's packaging/dependencies.nix
+                      boehmgc = pkgs.boehmgc.override {
+                        enableLargeConfig = true;
+                        # Increase the initial mark stack size to avoid stack
+                        # overflows, since these inhibit parallel marking (see
+                        # GC_mark_some()). To check whether the mark stack is too
+                        # small, run Nix with GC_PRINT_STATS=1 and look for messages
+                        # such as `Mark stack overflow`, `No room to copy back mark
+                        # stack`, and `Grew mark stack to ... frames`.
+                        initialMarkStackSize = "1048576";
+                        # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
+                        stdenv = pkgs.clangStdenv;
+                      };
+                    }
+                  );
+
               baseline = helper { };
 
               bolt-profiling = helper {
