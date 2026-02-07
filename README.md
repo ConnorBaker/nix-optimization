@@ -2,17 +2,21 @@
 
 Messing around with Clang's PGO/CSPGO/BOLT to optimize Nix for system closure evaluation.
 
+> [!NOTE]
+> PGO/CSPGO/BOLT profiles are generated (at least, here) through instruction-level instrumentation. As such, they're invariant with respect to the host architecture/machine load at time of profile generation, so we can build these in parallel.
+
 Having built and created aliases for the various configurations (ensuring only a single job and using the current machine) with
 
 ```console
-nix build -L --builders '' -j1 .#gcc.nix-cli -o gcc && \
-nix build -L --builders '' -j1 .#clang.nix-cli -o clang && \
-nix build -L --builders '' -j1 .#baseline.nix-cli -o baseline && \
-nix build -L --builders '' -j1 .#bolt.nix-cli -o bolt && \
-nix build -L --builders '' -j1 .#pgo.nix-cli -o pgo && \
-nix build -L --builders '' -j1 .#pgo-bolt.nix-cli -o pgo-bolt && \
-nix build -L --builders '' -j1 .#cs-pgo.nix-cli -o cs-pgo && \
-nix build -L --builders '' -j1 .#cs-pgo-bolt.nix-cli -o cs-pgo-bolt
+nix build -L .#{gcc,clang,baseline,bolt,pgo{,-bolt},cs-pgo{,-bolt}}.nix-cli --no-link && \
+nix build -L .#gcc.nix-cli -o gcc && \
+nix build -L .#clang.nix-cli -o clang && \
+nix build -L .#baseline.nix-cli -o baseline && \
+nix build -L .#bolt.nix-cli -o bolt && \
+nix build -L .#pgo.nix-cli -o pgo && \
+nix build -L .#pgo-bolt.nix-cli -o pgo-bolt && \
+nix build -L .#cs-pgo.nix-cli -o cs-pgo && \
+nix build -L .#cs-pgo-bolt.nix-cli -o cs-pgo-bolt
 ```
 
 I then benchmarked the results by evaluating the same system closure as the profile:

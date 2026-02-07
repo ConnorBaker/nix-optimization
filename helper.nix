@@ -13,7 +13,10 @@ lib.makeOverridable (
       frame-opt-rm-stores = true;
       frame-opt = "all";
 
-      hugify = true;
+      #   --assume-abi                                          - assume the ABI is never violated
+      #   --eliminate-unreachable                               - eliminate unreachable code
+
+      # hugify = true;
 
       icf = "all";
 
@@ -38,10 +41,12 @@ lib.makeOverridable (
       simplify-conditional-tail-calls = true;
       simplify-rodata-loads = true;
 
-      split-all-cold = true;
-      split-eh = true;
+      # split-all-cold = true;
+      # split-eh = true;
       split-functions = true;
       split-strategy = "cdsplit";
+
+      x86-strip-redundant-address-size = pkgs.stdenv.hostPlatform.isx86_64;
     },
 
     enablePGOProfiling ? false,
@@ -64,18 +69,45 @@ lib.makeOverridable (
       in
       lib.optionalString (suffix' != "") "-${suffix'}";
 
-    profileArgs =
-      lib.optionals enablePGOProfiling [ "-fprofile-generate" ]
-      ++ lib.optionals enableCSPGOProfiling [ "-fcs-profile-generate" ]
-      ++ lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [ "-fprofile-update=atomic" ]
-      # CSPGO uses the profile generated from PGO when it is add it's own profile-generation instrumentation
-      ++ lib.optionals (enablePGO || enableCSPGOProfiling) [
-        "-fprofile-use=${withPGOProfiling.nix-eval-profdata}"
-      ]
-      ++ lib.optionals enableCSPGO [ "-fprofile-use=${withCSPGOProfiling.nix-eval-profdata}" ];
+    enableProfiling = enablePGOProfiling || enableCSPGOProfiling || enableBOLTProfiling;
+
+    cflags = [
+      # "-march=raptorlake"
+      "-O3"
+      "-flto"
+      "-fsplit-lto-unit"
+      "-fforce-emit-vtables"
+      "-fstrict-vtable-pointers"
+      "-fwhole-program-vtables"
+      "-fvirtual-function-elimination"
+      "-fdevirtualize-speculatively" # requires Clang 22
+      # "-fexperimental-loop-fusion" # requires Clang 22
+      "-fno-semantic-interposition"
+      # The Hotness field in the Remark struct is defined as std::optional<uint64_t>, but the YAML parser uses
+      # parseUnsigned() which returns an unsigned (typically 32-bit), so large values for Hotness overflow.
+      "-fsave-optimization-record=bitstream"
+    ]
+    ++ lib.optionals enablePGOProfiling [
+      "-fprofile-generate"
+      "-ftemporal-profile" # temporal profiling can only be enabled for pgo; it segfaults cs-pgo
+    ]
+    ++ lib.optionals enableCSPGOProfiling [
+      "-fcs-profile-generate"
+    ]
+    # https://clang.llvm.org/docs/UsersManual.html#cmdoption-ftemporal-profile
+    ++ lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [
+      "-fprofile-update=atomic"
+    ]
+    # CSPGO uses the profile generated from PGO when it is add it's own profile-generation instrumentation
+    ++ lib.optionals (enablePGO || enableCSPGOProfiling) [
+      "-fprofile-use=${withPGOProfiling.profiles.merged}"
+    ]
+    ++ lib.optionals enableCSPGO [ "-fprofile-use=${withCSPGOProfiling.profiles.merged}" ];
 
     commonExtension = _: prevAttrs: {
       __structuredAttrs = true;
+
+      outputs = prevAttrs.outputs or [ "out" ] ++ [ "remarks" ];
 
       dontStrip = true;
       separateDebugInfo = false;
@@ -85,21 +117,37 @@ lib.makeOverridable (
       preferLocalBuild = true;
       allowSubstitutes = false;
 
-      env = prevAttrs.env or { } // {
-        CC_LD = "lld";
-        CXX_LD = "lld";
-      };
+      env =
+        let
+          cflagsString = lib.concatStringsSep " " cflags;
+        in
+        prevAttrs.env or { }
+        // {
+          CC_LD = "lld";
+          CXX_LD = "lld";
+          NIX_CFLAGS_COMPILE = " ${cflagsString}";
+          NIX_CFLAGS_LINK = " -Wl,-Bsymbolic-functions,--emit-relocs,-znow ${cflagsString}";
+        };
 
       nativeBuildInputs =
         prevAttrs.nativeBuildInputs or [ ]
         # LLD bintools wrapper is needed for BOLT-compatible builds (mold's PLT format is incompatible with BOLT)
         # Using llvmPackages.bintools instead of lld directly to get proper rpath handling via ld-wrapper.sh
-        # TODO: If llvmPackages is spliced, do we need to go through buildPackages?
-        ++ [ (lib.hiPrio pkgs.buildPackages.llvmPackages.bintools) ]
+        ++ [ (lib.hiPrio pkgs.llvmPackages_22.bintools) ]
         ++ lib.optionals (enableBOLTProfiling || enableBOLT) [
           pkgs.autoFixElfFiles
-          (lib.hiPrio pkgs.buildPackages.llvmPackages.bolt)
+          (lib.hiPrio pkgs.llvmPackages_22.bolt)
         ];
+
+      postInstall = prevAttrs.postInstall or "" + ''
+        for file in $(find . -type f -name "*.bitstream"); do
+          newPrefix=$(dirname "$remarks/$file")
+          mkdir -p "$newPrefix"
+          mv -v "$file" "$newPrefix"/
+        done
+        unset -v newPrefix
+        unset -v file
+      '';
 
       preFixup =
         prevAttrs.preFixup or ""
@@ -119,7 +167,7 @@ lib.makeOverridable (
         + lib.optionalString enableBOLT ''
           optimizeWithBolt() {
             local -r elfPath="$1"
-            local -r fdataPath="${withBOLTProfiling.nix-eval-system-closures-fdatum}/$(basename "$elfPath").fdata"
+            local -r fdataPath="${withBOLTProfiling.profiles.merged}/$(basename "$elfPath").fdata"
             if [[ ! -e $fdataPath ]]; then
               nixErrorLog "could not find fdata for $(basename "$elfPath"): $fdataPath"
               return
@@ -141,9 +189,6 @@ lib.makeOverridable (
   assert lib.assertMsg (enableBOLTProfiling -> (withBOLTProfiling == null && !enableBOLT)) ''
     BOLT profiling cannot be enabled if withBOLTProfiling is provided or enableBOLT is true.
   '';
-  assert lib.assertMsg (enableBOLTProfiling -> (withBOLTProfiling == null && !enableBOLT)) ''
-    BOLT profiling cannot be enabled if withBOLTProfiling is provided or enableBOLT is true.
-  '';
   assert lib.assertMsg (enablePGOProfiling -> (withPGOProfiling == null && !enablePGO)) ''
     PGO profiling cannot be enabled if withPGOProfiling is provided or enablePGO is true.
   '';
@@ -156,9 +201,18 @@ lib.makeOverridable (
       CSPGO profiling cannot be enabled if withPGOProfiling is not provided, withCSPGOProfiling is provided, enablePGO
       is true, or enableCSPGO is true.
     '';
+  assert lib.assertMsg
+    (
+      !(enableBOLTProfiling && enablePGOProfiling)
+      && !(enablePGOProfiling && enableCSPGOProfiling)
+      && !(enableCSPGOProfiling && enableBOLTProfiling)
+    )
+    ''
+      PGO/CSPGO/BOLT profiling cannot be enabled simultaneously.
+    '';
   (inputs.nix.lib.makeComponents {
     inherit pkgs;
-    getStdenv = builtins.getAttr "clangStdenv";
+    getStdenv = pkgs: pkgs.llvmPackages_22.stdenv;
   }).overrideScope
     (
       final: _: {
@@ -185,132 +239,130 @@ lib.makeOverridable (
             # stack`, and `Grew mark stack to ... frames`.
             initialMarkStackSize = "1048576";
             # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
-            stdenv = pkgs.clangStdenv;
+            stdenv = pkgs.llvmPackages_22.stdenv;
+          }).overrideAttrs
+            commonExtension;
+
+        # TODO Hack until https://github.com/NixOS/nixpkgs/issues/45462 is fixed.
+        # Copied from DetSys Nix's packaging/dependencies.nix
+        boost =
+          (pkgs.boost.override {
+            extraB2Args = [
+              "--with-container"
+              "--with-context"
+              "--with-coroutine"
+              "--with-iostreams"
+              "--with-url"
+              "--with-thread"
+            ];
+            enableIcu = false;
+            stdenv = pkgs.llvmPackages_22.stdenv;
           }).overrideAttrs
             (
               lib.composeExtensions commonExtension (
                 finalAttrs: prevAttrs: {
-                  env =
-                    let
-                      profileArgsString = lib.concatStringsSep " " profileArgs;
-                    in
-                    prevAttrs.env or { }
-                    // {
-                      # BoehmGC builds with O2 and without LTO.
-                      # TODO:
-                      # - https://clang.llvm.org/docs/UsersManual.html#cmdoption-fstrict-vtable-pointers
-                      # - https://clang.llvm.org/docs/UsersManual.html#cmdoption-fwhole-program-vtables
-                      NIX_CFLAGS_COMPILE = " -O3 -flto=thin ${profileArgsString}";
-                      NIX_CFLAGS_LINK = " -Wl,--emit-relocs -Wl,-znow -flto=thin ${profileArgsString}";
-                    };
+                  # Need to remove `--with-*` to use `--with-libraries=...`
+                  buildPhase = lib.replaceStrings [ "--without-python" ] [ "" ] prevAttrs.buildPhase;
+                  installPhase = lib.replaceStrings [ "--without-python" ] [ "" ] prevAttrs.installPhase;
                 }
               )
             );
 
-        nix-eval-system-closures-fdatum =
-          pkgs.runCommandLocal "nix${suffix}-eval-system-closures-fdatum"
-            {
-              nativeBuildInputs = [ final.nix-cli ];
-              meta.broken = !enableBOLTProfiling;
-            }
-            ''
-              nixLog "generating profile data by evaluating NixOS system closures with nix${suffix}"
-              nix eval \
-                --store dummy:// \
-                --eval-store dummy:// \
-                --read-only \
-                --no-eval-cache \
-                --json \
-                --eval-cores 1 \
-                -f "${pkgs.path}/nixos/release.nix" \
-                closures.gnome.x86_64-linux
-              mkdir -p "$out"
-              mv -v /tmp/*.fdata "$out"
-              nixLog "generated $out"
-            '';
+        mesonComponentOverrides = commonExtension;
 
-        # TODO: There's no derivation associated with nixpkgs since it's an eval-time fetcher, so we have to run the command locally
-        # since only the local store will be guaranteed to have it. Alternatively use fetchFromGitHub.
-        # The local machine is fine since that's the one we're doing profiling on anyway.
-        # TODO: Could create a dummy store for the evaluation to test copying/store operations (still wouldn't test daemon).
-        # TODO: Find out whether (since we're using many profiled libraries) they clobber eachother or what:
-        # https://clang.llvm.org/docs/UsersManual.html#profiling-with-instrumentation
-        nix-eval-system-closures-profraw =
-          pkgs.runCommandLocal "nix${suffix}-eval-system-closures.profraw"
-            {
-              nativeBuildInputs = [ final.nix-cli ];
-              meta.broken = !(enablePGOProfiling || enableCSPGOProfiling);
-            }
-            ''
-              nixLog "generating profile data by evaluating NixOS system closures with nix${suffix}"
-              LLVM_PROFILE_FILE="$out" nix eval \
-                --store dummy:// \
-                --eval-store dummy:// \
-                --read-only \
-                --no-eval-cache \
-                --json \
-                --eval-cores 1 \
-                -f "${pkgs.path}/nixos/release.nix" \
-                closures.gnome.x86_64-linux
-              nixLog "generated $out"
-            '';
+        profiles = {
+          eval = {
+            closures = {
+              # TODO: Find out whether (since we're using many profiled libraries) they clobber eachother or what:
+              # https://clang.llvm.org/docs/UsersManual.html#profiling-with-instrumentation
+              # TODO: Parallel evaluation, evaluate things other than system closurse, test with different memory/store setups.
+              gnome =
+                pkgs.runCommandLocal "profiles-eval-closures-nix${suffix}"
+                  {
+                    nativeBuildInputs = [
+                      final.nix-cli
+                      pkgs.writableTmpDirAsHomeHook
+                    ];
+                    meta.broken = !enableProfiling;
+                  }
+                  (
+                    ''
+                      nixLog "generating profile data by evaluating NixOS system closures with nix${suffix}"
+                    ''
+                    + lib.optionalString (enablePGOProfiling || enableCSPGOProfiling) ''
+                      export LLVM_PROFILE_FILE="$out"
+                    ''
+                    # TODO: There's no derivation associated with nixpkgs since it's an eval-time fetcher, so we have to run the command locally
+                    # since only the local store will be guaranteed to have it. Alternatively use fetchFromGitHub.
+                    # The local machine is fine since that's the one we're doing profiling on anyway.
+                    # TODO: Could create a dummy store for the evaluation to test copying/store operations (still wouldn't test daemon).
+                    + ''
+                      nix eval \
+                        --store /tmp/nix/store \
+                        --eval-store /tmp/nix/store \
+                        --json \
+                        --lazy-trees \
+                        --eval-cores 1 \
+                        -f "${pkgs.path}/nixos/release.nix" \
+                        closures.gnome
+                    ''
+                    + lib.optionalString enableBOLTProfiling ''
+                      mkdir -p "$out"
+                      mv -v /tmp/*.fdata "$out"
+                    ''
+                    + ''
+                      nixLog "generated $out"
+                    ''
+                  );
+            };
+          };
 
-        nix-eval-profdata =
-          pkgs.runCommandLocal "nix${suffix}-eval.profdata"
-            {
-              __structuredAttrs = true;
-              nativeBuildInputs = [ pkgs.llvmPackages.libllvm ];
-              profraws =
-                lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [
-                  final.nix-eval-system-closures-profraw
-                ]
-                # cs-pgo requires the original pgo profile as well.
-                ++ lib.optionals enableCSPGOProfiling [
-                  withPGOProfiling.nix-eval-system-closures-profraw
-                ];
-              meta.broken = !(enablePGOProfiling || enableCSPGOProfiling);
-            }
-            ''
-              nixLog "merging raw profiles"
-              echoCmd llvm-profdata merge -output="$out" "''${profraws[@]}"
-              llvm-profdata merge -output="$out" "''${profraws[@]}"
-              nixLog "created $out"
-            '';
+          merged =
+            pkgs.runCommandLocal "profiles-merged-nix${suffix}"
+              {
+                __structuredAttrs = true;
 
-        mesonComponentOverrides = lib.composeExtensions commonExtension (
-          finalAttrs: prevAttrs: {
-            nativeBuildInputs =
-              prevAttrs.nativeBuildInputs or [ ]
-              # LLD bintools wrapper is needed for BOLT-compatible builds (mold's PLT format is incompatible with BOLT)
-              # Using llvmPackages.bintools instead of lld directly to get proper rpath handling via ld-wrapper.sh
-              # TODO: If llvmPackages is spliced, do we need to go through buildPackages?
-              ++ [
-                (lib.hiPrio pkgs.buildPackages.clang-tools)
-                (lib.hiPrio pkgs.buildPackages.llvmPackages.llvm)
-              ];
+                nativeBuildInputs =
+                  lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [ pkgs.llvmPackages_22.libllvm ]
+                  ++ lib.optionals enableBOLTProfiling [ pkgs.llvmPackages_22.bolt ];
 
-            mesonFlags =
-              prevAttrs.mesonFlags or [ ]
-              ++ [
-                (lib.mesonBool "b_lto" true)
-                (lib.mesonOption "b_lto_mode" "thin")
-              ]
-              ++ lib.optionals (profileArgs != [ ]) [
-                (lib.mesonOption "cpp_args" (lib.concatStringsSep " " profileArgs))
-              ]
-              ++ [
-                (lib.mesonOption "cpp_link_args" (
-                  lib.concatStringsSep " " (
-                    [
-                      "-Wl,--emit-relocs"
-                      "-Wl,-znow"
-                    ]
-                    ++ profileArgs
-                  )
-                ))
-              ];
-          }
-        );
+                profiles =
+                  lib.optionals enableProfiling [
+                    final.profiles.eval.closures.gnome
+                  ]
+                  # cs-pgo requires the original pgo profile as well.
+                  ++ lib.optionals enableCSPGOProfiling [
+                    withPGOProfiling.profiles.eval.closures.gnome
+                  ];
+
+                meta.broken = !enableProfiling;
+              }
+              (
+                ''
+                  nixLog "merging profiles"
+                ''
+                # TODO: Better handling of temporal data merging (instead of using the default values):
+                # https://reviews.llvm.org/D147287
+                + lib.optionalString (enablePGOProfiling || enableCSPGOProfiling) ''
+                  llvm-profdata merge \
+                    --temporal-profile-trace-reservoir-size 100 \
+                    --temporal-profile-max-trace-length 1000 \
+                    --output="$out" \
+                    "''${profiles[@]}"
+                ''
+                # TODO: Merging of BOLT data: https://github.com/llvm/llvm-project/blob/main/bolt/README.md#multiple-profiles
+                + lib.optionalString enableBOLTProfiling ''
+                  nixErrorLog "TODO: merging of BOLT profiles"
+                  mkdir -p "$out"
+                  for profile in "''${profiles[@]}"; do
+                    cp -r "$profile"/* "$out"/
+                  done
+                ''
+                + ''
+                  nixLog "created $out"
+                ''
+              );
+        };
       }
     )
 )
