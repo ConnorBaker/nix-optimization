@@ -31,7 +31,9 @@ lib.makeOverridable (
       plt = "all";
 
       reg-reassign = true;
-      use-aggr-reg-reassign = true;
+      # With LLVM 22.1.8 BOLT, aggressive register reassignment miscompiles libnixfetchers.so (segfault in a static
+      # initializer constructing a boost::regex, at startup).
+      # use-aggr-reg-reassign = true;
 
       reorder-blocks = "ext-tsp";
       reorder-functions = "cdsort";
@@ -56,6 +58,22 @@ lib.makeOverridable (
     enableCSPGOProfiling ? false,
     withCSPGOProfiling ? null,
     enableCSPGO ? false,
+
+    # Attribute paths (into `profiles.eval`) of the workloads to generate PGO/CSPGO/BOLT profiles from.
+    profileWorkloads ? [
+      [
+        "closures"
+        "gnome"
+      ]
+    ],
+
+    # Patches to apply to the whole Nix source (e.g., vendored by a consumer of this flake), for every component and
+    # every profiling build alike.
+    patches ? [ ],
+
+    # Extra arguments for the `nix eval` of the `nixpkgs.parallel` workload (e.g., to enable settings added by
+    # `patches`, so that their code is profiled too).
+    extraProfileEvalArgs ? [ ],
   }:
   let
     suffix =
@@ -104,6 +122,8 @@ lib.makeOverridable (
     ]
     ++ lib.optionals enableCSPGO [ "-fprofile-use=${withCSPGOProfiling.profiles.merged}" ];
 
+    cflagsString = lib.concatStringsSep " " cflags;
+
     commonExtension = _: prevAttrs: {
       __structuredAttrs = true;
 
@@ -118,16 +138,28 @@ lib.makeOverridable (
       allowSubstitutes = false;
 
       env =
-        let
-          cflagsString = lib.concatStringsSep " " cflags;
-        in
         prevAttrs.env or { }
         // {
           CC_LD = "lld";
           CXX_LD = "lld";
-          NIX_CFLAGS_COMPILE = " ${cflagsString}";
-          NIX_CFLAGS_LINK = " -Wl,-Bsymbolic-functions,--emit-relocs,-znow ${cflagsString}";
+          NIX_CFLAGS_LINK =
+            prevAttrs.env.NIX_CFLAGS_LINK or ""
+            + " -Wl,-Bsymbolic-functions,--emit-relocs,-znow ${cflagsString}";
+        }
+        # Append rather than replace: e.g. DetSys's boehmgc sets its tuning knobs through NIX_CFLAGS_COMPILE.
+        // lib.optionalAttrs (!(prevAttrs ? NIX_CFLAGS_COMPILE)) {
+          NIX_CFLAGS_COMPILE = prevAttrs.env.NIX_CFLAGS_COMPILE or "" + " ${cflagsString}";
         };
+
+      # Some components (e.g. nix-expr) set NIX_CFLAGS_COMPILE as a derivation argument instead, which mkDerivation
+      # forbids from also being in `env` and which isn't exported with __structuredAttrs, so append to and export it.
+      ${if prevAttrs ? NIX_CFLAGS_COMPILE then "NIX_CFLAGS_COMPILE" else null} =
+        prevAttrs.NIX_CFLAGS_COMPILE + " ${cflagsString}";
+      preConfigure =
+        prevAttrs.preConfigure or ""
+        + lib.optionalString (prevAttrs ? NIX_CFLAGS_COMPILE) ''
+          export NIX_CFLAGS_COMPILE
+        '';
 
       nativeBuildInputs =
         prevAttrs.nativeBuildInputs or [ ]
@@ -210,37 +242,27 @@ lib.makeOverridable (
     ''
       PGO/CSPGO/BOLT profiling cannot be enabled simultaneously.
     '';
-  (inputs.nix.lib.makeComponents {
-    inherit pkgs;
-    getStdenv = pkgs: pkgs.llvmPackages_22.stdenv;
-  }).overrideScope
+  (
+    let
+      components = inputs.nix.lib.makeComponents {
+        inherit pkgs;
+        getStdenv = pkgs: pkgs.llvmPackages_22.stdenv;
+      };
+    in
+    # Applying patches switches the components to the whole (patched) source, so only do so when there are any.
+    if patches == [ ] then components else components.appendPatches patches
+  ).overrideScope
     (
       final: _: {
-        # Copied from DetSys Nix's packaging/dependencies.nix, using the version of Rust available upstream.
-        wasmtime =
-          let
-            wastimePath = inputs.nix.outPath + "/packaging/wasmtime.nix";
-          in
-          lib.optionalAttrs (lib.pathExists wastimePath) (
-            pkgs.callPackage (inputs.nix.outPath + "/packaging/wasmtime.nix") {
-              rust_1_89 = pkgs.rust_1_92;
-            }
-          );
-
-        # Copied from DetSys Nix's packaging/dependencies.nix
+        # DetSys Nix's packaging/dependencies.nix builds boehmgc from its own fork (the `bdwgc` flake input) with its
+        # own CFLAGS; keep that, but add our flags/instrumentation.
+        # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
         boehmgc =
-          (pkgs.boehmgc.override {
-            enableLargeConfig = true;
-            # Increase the initial mark stack size to avoid stack
-            # overflows, since these inhibit parallel marking (see
-            # GC_mark_some()). To check whether the mark stack is too
-            # small, run Nix with GC_PRINT_STATS=1 and look for messages
-            # such as `Mark stack overflow`, `No room to copy back mark
-            # stack`, and `Grew mark stack to ... frames`.
-            initialMarkStackSize = "1048576";
-            # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
+          (import (inputs.nix + "/packaging/dependencies.nix") {
+            inherit (inputs.nix) inputs;
+            inherit pkgs;
             stdenv = pkgs.llvmPackages_22.stdenv;
-          }).overrideAttrs
+          } final).boehmgc.overrideAttrs
             commonExtension;
 
         # TODO Hack until https://github.com/NixOS/nixpkgs/issues/45462 is fixed.
@@ -268,7 +290,13 @@ lib.makeOverridable (
               )
             );
 
-        mesonComponentOverrides = commonExtension;
+        mesonComponentOverrides = lib.composeExtensions commonExtension (
+          _: _: {
+            # Meson 1.12 (unlike 1.10, which DetSys pins) resolves unity-build sources in a source subdirectory named
+            # like the build directory (e.g. src/libstore/build/) relative to the build directory, so use another name.
+            mesonBuildDir = "_build";
+          }
+        );
 
         profiles = {
           eval = {
@@ -315,7 +343,94 @@ lib.makeOverridable (
                     ''
                   );
             };
+
+            nixpkgs = {
+              # Read-only parallel evaluation of every derivation path in Nixpkgs (with CUDA enabled), mirroring
+              # nixpkgs-review/Hydra-style evaluation rather than single-core evaluation of a system closure.
+              # NOTE: With PGO/CSPGO, `-fprofile-update=atomic` (see cflags) keeps the counters correct across eval
+              # threads, at the cost of contention (the instrumented evaluation is much slower than a normal one).
+              # NOTE: GC_DONT_GC=1 matches our workload, but means the collector's marking code is not trained.
+              parallel =
+                let
+                  walker = pkgs.writeText "walk-nixpkgs.nix" ''
+                    let
+                      inherit (builtins) deepSeq isAttrs isString mapAttrs tryEval;
+                      tryEval' = expr: (tryEval (deepSeq expr expr)).value;
+                      # The derivation path for a derivation, whether to recurse into an attribute set otherwise.
+                      unsafeMkValueReport =
+                        value:
+                        if isAttrs value then
+                          if value.type or null == "derivation" then value.drvPath else value.recurseForDerivations or false
+                        else
+                          false;
+                      mkNestedReport = mapAttrs (
+                        _: value:
+                        let
+                          maybeReport = tryEval' (unsafeMkValueReport value);
+                        in
+                        if isString maybeReport then
+                          maybeReport
+                        else if maybeReport then
+                          mkNestedReport value
+                        else
+                          null
+                      );
+                    in
+                    mkNestedReport
+                  '';
+                in
+                pkgs.runCommandLocal "profiles-eval-nixpkgs-parallel-nix${suffix}"
+                  {
+                    nativeBuildInputs = [
+                      final.nix-cli
+                      pkgs.writableTmpDirAsHomeHook
+                    ];
+                    meta.broken = !enableProfiling;
+                  }
+                  (
+                    ''
+                      nixLog "generating profile data by evaluating Nixpkgs in parallel with nix${suffix}"
+                    ''
+                    + lib.optionalString (enablePGOProfiling || enableCSPGOProfiling) ''
+                      export LLVM_PROFILE_FILE="$out"
+                    ''
+                    + ''
+                      GC_DONT_GC=1 nix eval \
+                        --offline \
+                        --store dummy:// \
+                        --read-only \
+                        --json \
+                        --impure \
+                        --no-eval-cache \
+                        --no-allow-import-from-derivation \
+                        --no-fsync-metadata \
+                        --lazy-trees \
+                        --extra-experimental-features 'ca-derivations parallel-eval' \
+                        --eval-cores 16 \
+                        ${
+                          lib.optionalString (
+                            extraProfileEvalArgs != [ ]
+                          ) "${lib.escapeShellArgs extraProfileEvalArgs} \\\n  "
+                        }--expr 'import ${walker} (import ${pkgs.path} {
+                          system = "${pkgs.stdenv.hostPlatform.system}";
+                          config = { allowUnfree = true; cudaSupport = true; inHydra = true; allowAliases = false; };
+                          __allowFileset = false;
+                        })' \
+                        > /dev/null
+                    ''
+                    + lib.optionalString enableBOLTProfiling ''
+                      mkdir -p "$out"
+                      mv -v /tmp/*.fdata "$out"
+                    ''
+                    + ''
+                      nixLog "generated $out"
+                    ''
+                  );
+            };
           };
+
+          # The profiles generated by the workloads in `eval` selected by `profileWorkloads`.
+          selected = map (path: lib.getAttrFromPath path final.profiles.eval) profileWorkloads;
 
           merged =
             pkgs.runCommandLocal "profiles-merged-nix${suffix}"
@@ -327,13 +442,9 @@ lib.makeOverridable (
                   ++ lib.optionals enableBOLTProfiling [ pkgs.llvmPackages_22.bolt ];
 
                 profiles =
-                  lib.optionals enableProfiling [
-                    final.profiles.eval.closures.gnome
-                  ]
+                  lib.optionals enableProfiling final.profiles.selected
                   # cs-pgo requires the original pgo profile as well.
-                  ++ lib.optionals enableCSPGOProfiling [
-                    withPGOProfiling.profiles.eval.closures.gnome
-                  ];
+                  ++ lib.optionals enableCSPGOProfiling withPGOProfiling.profiles.selected;
 
                 meta.broken = !enableProfiling;
               }

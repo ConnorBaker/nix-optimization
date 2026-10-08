@@ -5,6 +5,8 @@ Messing around with Clang's PGO/CSPGO/BOLT to optimize Nix for system closure ev
 > [!NOTE]
 > PGO/CSPGO/BOLT profiles are generated (at least, here) through instruction-level instrumentation. As such, they're invariant with respect to the host architecture/machine load at time of profile generation, so we can build these in parallel.
 
+The top-level variants are trained on single-core evaluation of `nixos/release.nix closures.gnome`. The same variants trained instead on a read-only parallel (`--eval-cores 16`) evaluation of every derivation path in Nixpkgs (with CUDA enabled) are under `nixpkgs-parallel-eval`, e.g. `.#nixpkgs-parallel-eval.cs-pgo-bolt.nix-cli` (see `profileWorkloads` in `helper.nix`).
+
 Having built and created aliases for the various configurations (ensuring only a single job and using the current machine) with
 
 ```console
