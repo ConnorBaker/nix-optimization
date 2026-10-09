@@ -74,6 +74,11 @@ lib.makeOverridable (
     # Extra arguments for the `nix eval` of the `nixpkgs.parallel` workload (e.g., to enable settings added by
     # `patches`, so that their code is profiled too).
     extraProfileEvalArgs ? [ ],
+
+    # Whether the evaluator uses Boehm GC. Without it, the evaluator allocates with (mimalloc's) malloc and never frees,
+    # which is fine for short-lived evaluations (e.g., ones that would run with GC_DONT_GC=1 anyway), and the whole heap
+    # is then in mimalloc's arenas (which can be backed by huge pages).
+    enableGC ? true,
   }:
   let
     suffix =
@@ -253,7 +258,11 @@ lib.makeOverridable (
     if patches == [ ] then components else components.appendPatches patches
   ).overrideScope
     (
-      final: _: {
+      final: prev:
+      lib.optionalAttrs (!enableGC) {
+        nix-expr = prev.nix-expr.override { enableGC = false; };
+      }
+      // {
         # DetSys Nix's packaging/dependencies.nix builds boehmgc from its own fork (the `bdwgc` flake input) with its
         # own CFLAGS; keep that, but add our flags/instrumentation.
         # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
