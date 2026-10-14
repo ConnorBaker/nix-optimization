@@ -266,6 +266,7 @@ lib.makeOverridable (
         ./patches/append-plugin-files.patch
         ./patches/upstream-clang-vtables.patch
         ./patches/tribuchet-external-builders.patch
+        ./patches/sergei-tarball-performance.patch
       ]
       ++ patches
     )
@@ -276,6 +277,13 @@ lib.makeOverridable (
         nix-expr = prev.nix-expr.override { enableGC = false; };
       }
       // {
+        # Shared by profiling/final Nix and every component/plugin consumer.
+        # PR #16427 requires the native zlib-ng and pack-config changes as
+        # well as its Nix source patch; changing only git-utils is insufficient.
+        libgit2 = pkgs.callPackage ./packages/libgit2-tarball-cache.nix {
+          stdenv = pkgs.llvmPackages_22.stdenv;
+        };
+
         # Preserve upstream Nix's GC tuning and add our Clang flags/instrumentation.
         # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
         boehmgc =
@@ -307,7 +315,7 @@ lib.makeOverridable (
           }).overrideAttrs
             (
               lib.composeExtensions commonExtension (
-                finalAttrs: prevAttrs: {
+                _: prevAttrs: {
                   # Need to remove `--with-*` to use `--with-libraries=...`
                   buildPhase = lib.replaceStrings [ "--without-python" ] [ "" ] prevAttrs.buildPhase;
                   installPhase = lib.replaceStrings [ "--without-python" ] [ "" ] prevAttrs.installPhase;
