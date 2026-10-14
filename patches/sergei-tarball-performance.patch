@@ -1,0 +1,115 @@
+From: Sergei Zimmerman <sergei@zimmerman.foo>
+Subject: [PATCH] libfetchers: tarball-cache and Git object-read performance
+Origin: https://github.com/NixOS/nix/pull/16427
+Upstream-head: 36bdf2ab83431794a8740e4bb61d1d8c45b91843
+Ported-to: a9f38ea0ee89f550616f342386f45e896f4abd18
+
+Source-only port of the draft's strict-hash-verification and in-memory
+pack.window settings. libgit2 2.0.0-rc.1 plus its three companion patches
+are supplied separately in the consumer's Nix dependency scope.
+
+Local adaptations: place dontFindDeltas in the shared tarballCacheOptions
+so serial readers and parallel writers both receive it; check the return
+value of git_libgit2_opts instead of silently ignoring a failure.
+
+diff --git a/src/libfetchers/git-utils.cc b/src/libfetchers/git-utils.cc
+index 414c5ac..363bc0b 100644
+--- a/src/libfetchers/git-utils.cc
++++ b/src/libfetchers/git-utils.cc
+@@ -24,6 +24,7 @@
+ #include <git2/branch.h>
+ #include <git2/commit.h>
+ #include <git2/config.h>
++#include <git2/sys/config.h>
+ #include <git2/describe.h>
+ #include <git2/errors.h>
+ #include <git2/global.h>
+@@ -145,6 +146,11 @@ typedef std::unique_ptr<git_describe_result, Deleter<git_describe_result_free>>
+ typedef std::unique_ptr<git_status_list, Deleter<git_status_list_free>> StatusList;
+ typedef std::unique_ptr<git_remote, Deleter<git_remote_free>> Remote;
+ typedef std::unique_ptr<git_config, Deleter<git_config_free>> GitConfig;
++typedef std::unique_ptr<git_config_backend, decltype([](git_config_backend * backend) {
++                            if (backend)
++                                backend->free(backend);
++                        })>
++    GitConfigBackend;
+ typedef std::unique_ptr<git_config_iterator, Deleter<git_config_iterator_free>> ConfigIterator;
+ typedef std::unique_ptr<git_odb, Deleter<git_odb_free>> ObjectDb;
+ typedef std::unique_ptr<git_packbuilder, Deleter<git_packbuilder_free>> PackBuilder;
+@@ -179,6 +185,13 @@ static void initLibGit2()
+     std::call_once(initialized, []() {
+         if (git_libgit2_init() < 0)
+             throw GitError("initialising libgit2");
++
++        /* Nuke the "hashing on all reads" behavior, since that can lead to bad
++           performance https://github.com/libgit2/libgit2/issues/4951. It's a
++           compromise of course, but one that is mostly in line with git cli and
++           like how we don't recalculate narHash when reading from a store. */
++        if (git_libgit2_opts(GIT_OPT_ENABLE_STRICT_HASH_VERIFICATION, 0) < 0)
++            throw GitError("disabling strict Git object hash verification");
+     });
+ }
+ 
+@@ -378,6 +391,28 @@ struct GitRepoImpl : GitRepo, std::enable_shared_from_this<GitRepoImpl>
+         if (git_repository_open(Setter(repo), path.string().c_str()))
+             throw GitError("opening Git repository %s", PathFmt(path));
+ 
++        GitConfig config;
++        if (git_repository_config(Setter(config), *this))
++            throw GitError("getting Git repository config");
++
++        /* Create an in-memory configuration so that we can set config options without modifying the
++           config file on-disk. */
++        git_config_backend_memory_options configOpts = GIT_CONFIG_BACKEND_MEMORY_OPTIONS_INIT;
++        configOpts.backend_type = "nix";
++
++        std::vector<const char *> configValues;
++        if (options.dontFindDeltas)
++            configValues.push_back("pack.window=0");
++
++        GitConfigBackend memBackend;
++        if (git_config_backend_from_values(Setter(memBackend), configValues.data(), configValues.size(), &configOpts))
++            throw GitError("creating an in-memory Git config");
++
++        if (git_config_add_backend(config.get(), memBackend.get(), GIT_CONFIG_LEVEL_APP, *this, /*force=*/false))
++            throw GitError("adding the in-memory Git configuration backend");
++
++        memBackend.release();
++
+         ObjectDb odb;
+         if (options.packfilesOnly) {
+             /* Create a fresh object database because by default the repo also
+@@ -1687,7 +1722,15 @@ static std::filesystem::path tarballCacheDir()
+     return repoDir;
+ }
+ 
+-static constexpr GitRepo::Options tarballCacheOptions{.create = true, .bare = true, .packfilesOnly = true};
++static constexpr GitRepo::Options tarballCacheOptions{
++    .create = true,
++    .bare = true,
++    .packfilesOnly = true,
++    /* Tarball unpacking is not expected to benefit from deltas much,
++       compared to how much CPU time it takes to find them. Applies to
++       both the reader repository and every parallel writer repository. */
++    .dontFindDeltas = true,
++};
+ 
+ ref<GitRepo> Settings::getTarballCache() const
+ {
+diff --git a/src/libfetchers/include/nix/fetchers/git-utils.hh b/src/libfetchers/include/nix/fetchers/git-utils.hh
+index 09a4a7d..caf6a7a 100644
+--- a/src/libfetchers/include/nix/fetchers/git-utils.hh
++++ b/src/libfetchers/include/nix/fetchers/git-utils.hh
+@@ -32,6 +32,12 @@ struct GitRepo
+         bool create = false;
+         bool bare = false;
+         bool packfilesOnly = false;
++        /**
++         * Whether to avoid finding deltas when writing packfiles. It's an
++         * expensive operation, which should be avoided if no benefit is
++         * expected from possible deduplication in the same packfile.
++         */
++        bool dontFindDeltas = false;
+     };
+ 
+     static ref<GitRepo> openRepo(const std::filesystem::path & path, Options options);
