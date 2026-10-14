@@ -1,0 +1,61 @@
+diff --git a/src/libcmd/command.cc b/src/libcmd/command.cc
+index 821c9e0..b12481e 100644
+--- a/src/libcmd/command.cc
++++ b/src/libcmd/command.cc
+@@ -158,8 +158,12 @@ EvalCommand::~EvalCommand()
+ 
+ ref<Store> EvalCommand::getEvalStore()
+ {
+-    if (!evalStore)
+-        evalStore = evalStoreUrl ? openStore(StoreReference{*evalStoreUrl}) : getStore();
++    if (!evalStore) {
++        auto url = evalStoreUrl;
++        if (!url && !evalSettings.defaultEvalStore.get().empty())
++            url = StoreReference::parse(evalSettings.defaultEvalStore.get());
++        evalStore = url ? openStore(StoreReference{*url}) : getStore();
++    }
+     return ref<Store>(evalStore);
+ }
+ 
+diff --git a/src/libexpr/include/nix/expr/eval-settings.hh b/src/libexpr/include/nix/expr/eval-settings.hh
+index bd32a51..51a82e4 100644
+--- a/src/libexpr/include/nix/expr/eval-settings.hh
++++ b/src/libexpr/include/nix/expr/eval-settings.hh
+@@ -101,6 +101,11 @@ public:
+ 
+     std::vector<PrimOp> extraPrimOps;
+ 
++    Setting<std::string> defaultEvalStore{
++        this, "", "eval-store",
++        "Default store URL for evaluation artifacts. An empty value uses the build store. "
++        "The --eval-store command-line argument takes precedence."};
++
+     Setting<bool> enableNativeCode{this, false, "allow-unsafe-native-code-during-evaluation", R"(
+         Enable built-in functions that allow executing native code.
+ 
+diff --git a/src/nix/nix-build/nix-build.cc b/src/nix/nix-build/nix-build.cc
+index 09d843e..c670c36 100644
+--- a/src/nix/nix-build/nix-build.cc
++++ b/src/nix/nix-build/nix-build.cc
+@@ -320,6 +320,8 @@ static void main_nix_build(int argc, char ** argv)
+         throw UsageError("'-p' and '-E' are mutually exclusive");
+ 
+     auto store = openStore();
++    if (!myArgs.evalStoreUrl && !evalSettings.defaultEvalStore.get().empty())
++        myArgs.evalStoreUrl = StoreReference::parse(evalSettings.defaultEvalStore.get());
+     auto evalStore = myArgs.evalStoreUrl ? openStore(StoreReference{*myArgs.evalStoreUrl}) : store;
+ 
+     auto state = std::make_shared<EvalState>(myArgs.lookupPath, evalStore, fetchSettings, evalSettings, store);
+diff --git a/src/nix/nix-instantiate/nix-instantiate.cc b/src/nix/nix-instantiate/nix-instantiate.cc
+index b180472..3ed46fc 100644
+--- a/src/nix/nix-instantiate/nix-instantiate.cc
++++ b/src/nix/nix-instantiate/nix-instantiate.cc
+@@ -167,6 +167,8 @@ static int main_nix_instantiate(int argc, char ** argv)
+             settings.readOnlyMode = true;
+ 
+         auto store = openStore();
++        if (!myArgs.evalStoreUrl && !evalSettings.defaultEvalStore.get().empty())
++            myArgs.evalStoreUrl = StoreReference::parse(evalSettings.defaultEvalStore.get());
+         auto evalStore = myArgs.evalStoreUrl ? openStore(StoreReference{*myArgs.evalStoreUrl}) : store;
+ 
+         auto state = std::make_shared<EvalState>(myArgs.lookupPath, evalStore, fetchSettings, evalSettings, store);

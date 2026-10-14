@@ -1,13 +1,18 @@
 {
   inputs = {
     nix = {
-      url = "github:DeterminateSystems/nix-src";
+      url = "github:NixOS/nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
     flake-parts.follows = "nix/flake-parts";
 
     nixpkgs.url = "github:nixos/nixpkgs";
+
+    nix-tarmac = {
+      url = "github:Mic92/nix-tarmac";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
 
     git-hooks-nix.url = "github:cachix/git-hooks.nix";
 
@@ -120,7 +125,7 @@
       # For consumers of this flake, e.g. to build variants of a patched Nix:
       #   inputs.nix-optimization.lib.mkOptimizedVariants {
       #     system = "x86_64-linux";
-      #     profileWorkloads = [ [ "nixpkgs" "parallel" ] ];
+      #     profileWorkloads = [ [ "nixpkgs" "serial" ] ];
       #     patches = [ ./my.patch ];
       #   }
       flake.lib.mkOptimizedVariants =
@@ -140,6 +145,46 @@
           ...
         }:
         {
+          packages =
+            let
+              mkTarmacNix =
+                components:
+                let
+                  nix = components.nix-cli;
+                  plugin = pkgs.callPackage (inputs.nix-tarmac + "/package.nix") {
+                    inherit (components) nix-fetchers nix-store nix-util;
+                    doCheck = true;
+                  };
+                in
+                pkgs.symlinkJoin {
+                  name = "${nix.name}-with-tarmac";
+                  paths = [ nix ];
+                  nativeBuildInputs = [ pkgs.makeWrapper ];
+                  postBuild = ''
+                    for executable in "$out"/bin/*; do
+                      commandName=$(basename "$executable")
+                      rm "$executable"
+                      makeWrapper ${nix}/bin/nix "$executable" \
+                        --argv0 "$commandName" \
+                        --suffix NIX_CONFIG $'\n' \
+                        "extra-plugin-files = ${plugin}/lib/nix/plugins/nix-tarmac-loader.so" \
+                        --suffix NIX_CONFIG $'\n' "eval-store = tarmac://"
+                    done
+                  '';
+                  passthru = {
+                    inherit components plugin;
+                    inherit (components.nix-everything) libs version;
+                    unwrapped = nix;
+                  };
+                  meta.mainProgram = "nix";
+                };
+            in
+            {
+              tarmac-baseline = mkTarmacNix config.legacyPackages.baseline;
+              tarmac-pgo = mkTarmacNix config.legacyPackages.pgo;
+              tarmac-cs-pgo-bolt = mkTarmacNix config.legacyPackages.cs-pgo-bolt;
+            };
+
           legacyPackages =
             let
               helper = import ./helper.nix {
@@ -148,23 +193,25 @@
             in
             {
               gcc =
-                (inputs.nix.lib.makeComponents {
-                  inherit pkgs;
-                  getStdenv = builtins.getAttr "stdenv";
-                }).overrideScope
+                (
+                  (inputs.nix.lib.makeComponents {
+                    inherit pkgs;
+                    getStdenv = builtins.getAttr "stdenv";
+                  }).appendPatches
+                    [ ./patches/upstream-clang-vtables.patch ]
+                ).overrideScope
                   (
                     final: _: {
-                      # DetSys Nix's packaging/dependencies.nix builds boehmgc from its own fork (the `bdwgc` flake
-                      # input) with its own CFLAGS; keep that and only swap the stdenv.
+                      # Preserve upstream Nix's GC tuning and use Clang for the collector.
                       # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
                       boehmgc =
                         (import (inputs.nix + "/packaging/dependencies.nix") {
-                          inherit (inputs.nix) inputs;
                           inherit pkgs;
                           stdenv = pkgs.clangStdenv;
-                        } final).boehmgc;
+                        } final).boehmgc.override
+                          { stdenv = pkgs.clangStdenv; };
 
-                      # Meson 1.12 (unlike 1.10, which DetSys pins) resolves unity-build sources in a source subdirectory
+                      # Meson 1.12 resolves unity-build sources in a source subdirectory
                       # named like the build directory (e.g. src/libstore/build/) relative to the build directory, so use
                       # another name.
                       mesonComponentOverrides = _: _: { mesonBuildDir = "_build"; };
@@ -172,23 +219,25 @@
                   );
 
               clang =
-                (inputs.nix.lib.makeComponents {
-                  inherit pkgs;
-                  getStdenv = builtins.getAttr "clangStdenv";
-                }).overrideScope
+                (
+                  (inputs.nix.lib.makeComponents {
+                    inherit pkgs;
+                    getStdenv = builtins.getAttr "clangStdenv";
+                  }).appendPatches
+                    [ ./patches/upstream-clang-vtables.patch ]
+                ).overrideScope
                   (
                     final: _: {
-                      # DetSys Nix's packaging/dependencies.nix builds boehmgc from its own fork (the `bdwgc` flake
-                      # input) with its own CFLAGS; keep that and only swap the stdenv.
+                      # Preserve upstream Nix's GC tuning and use Clang for the collector.
                       # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
                       boehmgc =
                         (import (inputs.nix + "/packaging/dependencies.nix") {
-                          inherit (inputs.nix) inputs;
                           inherit pkgs;
                           stdenv = pkgs.clangStdenv;
-                        } final).boehmgc;
+                        } final).boehmgc.override
+                          { stdenv = pkgs.clangStdenv; };
 
-                      # Meson 1.12 (unlike 1.10, which DetSys pins) resolves unity-build sources in a source subdirectory
+                      # Meson 1.12 resolves unity-build sources in a source subdirectory
                       # named like the build directory (e.g. src/libstore/build/) relative to the build directory, so use
                       # another name.
                       mesonComponentOverrides = _: _: { mesonBuildDir = "_build"; };
@@ -209,13 +258,13 @@
               ];
             }
             // {
-              # Trained on a read-only parallel evaluation of all of Nixpkgs instead.
-              nixpkgs-parallel-eval = mkOptimizedVariants {
+              # Trained on a read-only serial evaluation of all of Nixpkgs instead.
+              nixpkgs-eval = mkOptimizedVariants {
                 inherit lib pkgs;
                 profileWorkloads = [
                   [
                     "nixpkgs"
-                    "parallel"
+                    "serial"
                   ]
                 ];
               };

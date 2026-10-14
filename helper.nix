@@ -71,7 +71,7 @@ lib.makeOverridable (
     # every profiling build alike.
     patches ? [ ],
 
-    # Extra arguments for the `nix eval` of the `nixpkgs.parallel` workload (e.g., to enable settings added by
+    # Extra arguments for the `nix eval` of the `nixpkgs.serial` workload (e.g., to enable settings added by
     # `patches`, so that their code is profiled too).
     extraProfileEvalArgs ? [ ],
 
@@ -151,7 +151,7 @@ lib.makeOverridable (
             prevAttrs.env.NIX_CFLAGS_LINK or ""
             + " -Wl,-Bsymbolic-functions,--emit-relocs,-znow ${cflagsString}";
         }
-        # Append rather than replace: e.g. DetSys's boehmgc sets its tuning knobs through NIX_CFLAGS_COMPILE.
+        # Preserve dependencies' tuning knobs when appending optimization flags.
         // lib.optionalAttrs (!(prevAttrs ? NIX_CFLAGS_COMPILE)) {
           NIX_CFLAGS_COMPILE = prevAttrs.env.NIX_CFLAGS_COMPILE or "" + " ${cflagsString}";
         };
@@ -254,8 +254,15 @@ lib.makeOverridable (
         getStdenv = pkgs: pkgs.llvmPackages_22.stdenv;
       };
     in
-    # Applying patches switches the components to the whole (patched) source, so only do so when there are any.
-    if patches == [ ] then components else components.appendPatches patches
+    # Patch every optimized and profiling component from the same source tree.
+    components.appendPatches (
+      [
+        ./patches/default-eval-store.patch
+        ./patches/append-plugin-files.patch
+        ./patches/upstream-clang-vtables.patch
+      ]
+      ++ patches
+    )
   ).overrideScope
     (
       final: prev:
@@ -263,21 +270,24 @@ lib.makeOverridable (
         nix-expr = prev.nix-expr.override { enableGC = false; };
       }
       // {
-        # DetSys Nix's packaging/dependencies.nix builds boehmgc from its own fork (the `bdwgc` flake input) with its
-        # own CFLAGS; keep that, but add our flags/instrumentation.
+        # Preserve upstream Nix's GC tuning and add our Clang flags/instrumentation.
         # Must use clangStdenv else we get segfaults when program is exiting if we've BOLTed the binary.
         boehmgc =
-          (import (inputs.nix + "/packaging/dependencies.nix") {
-            inherit (inputs.nix) inputs;
-            inherit pkgs;
-            stdenv = pkgs.llvmPackages_22.stdenv;
-          } final).boehmgc.overrideAttrs
+          (
+            (import (inputs.nix + "/packaging/dependencies.nix") {
+              inherit pkgs;
+              stdenv = pkgs.llvmPackages_22.stdenv;
+            } final).boehmgc.override
+              {
+                stdenv = pkgs.llvmPackages_22.stdenv;
+              }
+          ).overrideAttrs
             commonExtension;
 
         # TODO Hack until https://github.com/NixOS/nixpkgs/issues/45462 is fixed.
-        # Copied from DetSys Nix's packaging/dependencies.nix
+        # Follow upstream Nix's Boost 1.89 pin (Boost 1.91 regresses boost.url).
         boost =
-          (pkgs.boost.override {
+          (pkgs.boost189.override {
             extraB2Args = [
               "--with-container"
               "--with-context"
@@ -301,7 +311,7 @@ lib.makeOverridable (
 
         mesonComponentOverrides = lib.composeExtensions commonExtension (
           _: _: {
-            # Meson 1.12 (unlike 1.10, which DetSys pins) resolves unity-build sources in a source subdirectory named
+            # Meson 1.12 resolves unity-build sources in a source subdirectory named
             # like the build directory (e.g. src/libstore/build/) relative to the build directory, so use another name.
             mesonBuildDir = "_build";
           }
@@ -334,12 +344,10 @@ lib.makeOverridable (
                     # The local machine is fine since that's the one we're doing profiling on anyway.
                     # TODO: Could create a dummy store for the evaluation to test copying/store operations (still wouldn't test daemon).
                     + ''
-                      nix eval \
+                      nix eval --extra-experimental-features nix-command \
                         --store /tmp/nix/store \
                         --eval-store /tmp/nix/store \
                         --json \
-                        --lazy-trees \
-                        --eval-cores 1 \
                         -f "${pkgs.path}/nixos/release.nix" \
                         closures.gnome
                     ''
@@ -354,12 +362,10 @@ lib.makeOverridable (
             };
 
             nixpkgs = {
-              # Read-only parallel evaluation of every derivation path in Nixpkgs (with CUDA enabled), mirroring
-              # nixpkgs-review/Hydra-style evaluation rather than single-core evaluation of a system closure.
-              # NOTE: With PGO/CSPGO, `-fprofile-update=atomic` (see cflags) keeps the counters correct across eval
-              # threads, at the cost of contention (the instrumented evaluation is much slower than a normal one).
+              # Read-only serial evaluation of every derivation path in Nixpkgs (with CUDA enabled), mirroring
+              # nixpkgs-review/Hydra-style evaluation rather than evaluation of a single system closure.
               # NOTE: GC_DONT_GC=1 matches our workload, but means the collector's marking code is not trained.
-              parallel =
+              serial =
                 let
                   walker = pkgs.writeText "walk-nixpkgs.nix" ''
                     let
@@ -388,7 +394,7 @@ lib.makeOverridable (
                     mkNestedReport
                   '';
                 in
-                pkgs.runCommandLocal "profiles-eval-nixpkgs-parallel-nix${suffix}"
+                pkgs.runCommandLocal "profiles-eval-nixpkgs-serial-nix${suffix}"
                   {
                     nativeBuildInputs = [
                       final.nix-cli
@@ -398,7 +404,7 @@ lib.makeOverridable (
                   }
                   (
                     ''
-                      nixLog "generating profile data by evaluating Nixpkgs in parallel with nix${suffix}"
+                      nixLog "generating profile data by evaluating Nixpkgs serially with nix${suffix}"
                     ''
                     + lib.optionalString (enablePGOProfiling || enableCSPGOProfiling) ''
                       export LLVM_PROFILE_FILE="$out"
@@ -413,9 +419,7 @@ lib.makeOverridable (
                         --no-eval-cache \
                         --no-allow-import-from-derivation \
                         --no-fsync-metadata \
-                        --lazy-trees \
-                        --extra-experimental-features 'ca-derivations parallel-eval' \
-                        --eval-cores 16 \
+                        --extra-experimental-features 'nix-command ca-derivations' \
                         ${
                           lib.optionalString (
                             extraProfileEvalArgs != [ ]
