@@ -23,7 +23,7 @@ pkgs.symlinkJoin {
         --suffix NIX_CONFIG $'\n' \
         "extra-plugin-files = ${plugin}/lib/nix/plugins/nix-tarmac-loader.so" \
         --suffix NIX_CONFIG $'\n' "eval-store = tarmac://" \
-        --run 'if [ -n "''${NIX_BUILD_TOP-}" ] && [ -z "''${XDG_CACHE_HOME+x}" ]; then
+        --run 'if [ -n "''${NIX_BUILD_TOP-}" ] && [ -z "''${XDG_CACHE_HOME+x}" ] && [ ! -w "''${HOME-}" ]; then
           # Builders normally have a read-only /homeless-shelter HOME.
           # Keep automatic evaluation usable with a private per-build cache.
           export XDG_CACHE_HOME="$NIX_BUILD_TOP/.cache"
