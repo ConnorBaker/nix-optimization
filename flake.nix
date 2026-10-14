@@ -174,6 +174,7 @@
                     done
                   '';
                   passthru = {
+                    inherit (nix) pname;
                     inherit components plugin;
                     inherit (components.nix-everything) libs version;
                     unwrapped = nix;
