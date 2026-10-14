@@ -11,6 +11,8 @@ All optimized and profiling component sets apply `patches/default-eval-store.pat
 
 The `tarmac-baseline`, `tarmac-pgo`, and `tarmac-cs-pgo-bolt` packages build unmodified nix-tarmac against the corresponding Nix libraries and wrap the commands to load the plugin and select `eval-store = tarmac://` automatically. The upstream versioned library SONAMEs work with Tarmac's normal plugin dispatcher. Neither the Determinate compatibility patch nor a plugin-selection environment override is needed. `patches/append-plugin-files.patch` restores append support for filesystem-path lists, and the wrapper uses `extra-plugin-files` so separately configured plugins, such as gRPC, survive. The third optional argument to `tests/tarmac.sh` checks preservation of another plugin loader.
 
+`patches/tribuchet-external-builders.patch` ports Tribuchet's UID-range dispatch, declined-build local fallback, and recursive output-reference registration to the pinned upstream builder API. It is applied before every optimized and profiling build. On Linux, run `sudo bash tests/external-builders.sh /path/to/unwrapped/nix /path/to/python3` to test those behaviors in a disposable store under `/run`; root is needed for UID allocation. The test helper implements the same startup handshake as Tribuchet's attach shim. This test verifies Nix's interface and output registration, not deployment of a live hub/worker pool.
+
 ```console
 nix build .#tarmac-baseline -o result-tarmac-baseline
 nix build .#tarmac-pgo -o result-tarmac-pgo

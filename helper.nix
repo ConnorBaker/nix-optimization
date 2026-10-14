@@ -260,6 +260,7 @@ lib.makeOverridable (
         ./patches/default-eval-store.patch
         ./patches/append-plugin-files.patch
         ./patches/upstream-clang-vtables.patch
+        ./patches/tribuchet-external-builders.patch
       ]
       ++ patches
     )
