@@ -29,7 +29,7 @@ if mode == 'decline':
     sys.exit(222)
 real_store = pathlib.Path(request['realStoreDir'])
 output = real_store / pathlib.Path(request['outputs']['out']).name
-if mode == 'recursive':
+if mode in ('recursive', 'remote-recursive'):
     added = request['env']['ADDED_PATH']
     output.write_text(added + '\n')
     (pathlib.Path(request['topTmpDir']) / 'result.json').write_text(
@@ -82,4 +82,29 @@ test "$(cat "$task_store/nix/store/$(basename "$task_output")")" = "$task_added"
 "$task_nix" --store "$task_store" --extra-experimental-features nix-command \
   path-info --recursive "/nix/store/$(basename "$task_output")" | grep -Fx "$task_added"
 
-printf 'External dispatch, uid-range, decline fallback, and recursive output references passed.\n'
+# A recursive build through the ordinary SSH hook must copy new references
+# back too. localhost invokes the stdio daemon directly, without an SSH server.
+task_remote_store="$task_tmp/remote-store"
+printf 'remote-only payload\n' > "$task_tmp/remote-payload"
+task_remote_added=$("$task_nix" --store "$task_remote_store" \
+  --extra-experimental-features nix-command store add-path "$task_tmp/remote-payload")
+task_remote_added="/nix/store/$(basename "$task_remote_added")"
+task_remote_daemon="$task_tmp/remote-daemon"
+printf '#!%s\n' "$(command -v bash)" > "$task_remote_daemon"
+printf 'export NIX_CONFIG=%q\n' \
+  $'experimental-features = nix-command external-builders recursive-nix\nsandbox = false\nmax-jobs = 1\nexternal-builders = '"$task_external" >> "$task_remote_daemon"
+printf 'exec %q "$@"\n' "$(dirname "$task_nix")/nix-daemon" >> "$task_remote_daemon"
+chmod 755 "$task_remote_daemon"
+task_remote_uri="ssh-ng://localhost?remote-store=$task_remote_store&remote-program=$task_remote_daemon"
+task_output=$("$task_nix" build --store "$task_store" --eval-store "$task_store" \
+  --extra-experimental-features 'nix-command recursive-nix' \
+  --option sandbox false --max-jobs 0 \
+  --option build-hook "$task_nix __build-remote" \
+  --builders "$task_remote_uri x86_64-linux - 1 1 recursive-nix" \
+  --no-link --print-out-paths --expr "$(task_expr remote-recursive \
+    "requiredSystemFeatures = [ \"recursive-nix\" ]; ADDED_PATH = \"$task_remote_added\";")")
+test "$(cat "$task_store/nix/store/$(basename "$task_remote_added")")" = 'remote-only payload'
+"$task_nix" --store "$task_store" --extra-experimental-features nix-command \
+  path-info --recursive "$task_output" | grep -Fx "$task_remote_added"
+
+printf 'External dispatch, uid-range, decline fallback, recursive references, and remote closure transfer passed.\n'
