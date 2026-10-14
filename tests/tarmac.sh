@@ -72,4 +72,26 @@ task_nix_build="$(dirname "$task_nix")/nix-build"
 task_legacy_output=$("$task_nix_build" --no-out-link --builders '' \
   "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-legacy")
 test "$(cat "$task_legacy_output")" = "build works $task_tmp-legacy"
+
+# An already evaluated derivation can have been copied by another machine.
+# Its metadata belongs to the build store, not this evaluator's Tarmac cache.
+task_nix_instantiate="$(dirname "$task_nix")/nix-instantiate"
+task_existing_drv=$("$task_nix_instantiate" --eval-store auto \
+  "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-imported")
+task_existing_output=$("$task_nix" build "$task_existing_drv^*" --no-link --print-out-paths --builders '')
+test "$(cat "$task_existing_output")" = "build works $task_tmp-imported"
+"$task_nix" derivation show "$task_existing_drv" > "$task_tmp/existing-drv.json"
+test -s "$task_tmp/existing-drv.json"
+task_existing_legacy=$("$task_nix_build" --no-out-link --builders '' "$task_existing_drv")
+test "$task_existing_legacy" = "$task_existing_output"
+
+# A drv produced only in this user's Tarmac cache must keep using that cache.
+task_cached_drv=$("$task_nix_instantiate" \
+  "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-cached")
+if "$(dirname "$task_nix")/nix-store" --check-validity "$task_cached_drv" 2>/dev/null; then
+  printf 'cached-only derivation unexpectedly exists in the build store\n' >&2
+  exit 1
+fi
+task_cached_output=$("$task_nix" build "$task_cached_drv^*" --no-link --print-out-paths --builders '')
+test "$(cat "$task_cached_output")" = "build works $task_tmp-cached"
 printf 'Tarmac default evaluation, persistence, concurrent writers, explicit override, legacy evaluation, and modern and legacy builds passed.\n'

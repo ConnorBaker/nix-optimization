@@ -96,7 +96,7 @@ printf 'export NIX_CONFIG=%q\n' \
 printf 'exec %q "$@"\n' "$(dirname "$task_nix")/nix-daemon" >> "$task_remote_daemon"
 chmod 755 "$task_remote_daemon"
 task_remote_uri="ssh-ng://localhost?remote-store=$task_remote_store&remote-program=$task_remote_daemon"
-task_output=$("$task_nix" build --store "$task_store" --eval-store "$task_store" \
+task_output=$("$task_nix" build --store "$task_store" --eval-store "$task_tmp/eval-store" \
   --extra-experimental-features 'nix-command recursive-nix' \
   --option sandbox false --max-jobs 0 \
   --option build-hook "$task_nix __build-remote" \

@@ -1,5 +1,4 @@
 diff --git a/src/libstore/build/derivation-building-goal.cc b/src/libstore/build/derivation-building-goal.cc
-index 9cc3016..f36c488 100644
 --- a/src/libstore/build/derivation-building-goal.cc
 +++ b/src/libstore/build/derivation-building-goal.cc
 @@ -27,6 +27,9 @@
@@ -12,7 +11,7 @@ index 9cc3016..f36c488 100644
  
  #include <nlohmann/json.hpp>
  
-@@ -1055,6 +1058,20 @@ Goal::Co<DerivationBuildingGoal::LocalBuildOutcome> DerivationBuildingGoal::buil
+@@ -1055,6 +1058,20 @@
      if (!statusOk(status)) {
          builder->cleanupBuild(false);
          builder.reset();
@@ -33,29 +32,48 @@ index 9cc3016..f36c488 100644
          outputLocks.unlock();
          co_return fixupBuilderFailureErrorMessage(
              {
+@@ -1228,10 +1245,17 @@
+ #ifdef _WIN32 // TODO enable build hook on Windows
+     return rpDecline;
+ #else
+-    /* This should use `worker.evalStore`, but per #13179 the build hook
+-       doesn't work with eval store anyways. */
+-    if (worker.settings.buildHook.get().empty() || !worker.tryBuildHook || !worker.store.isValidPath(drvPath))
++    if (worker.settings.buildHook.get().empty() || !worker.tryBuildHook)
+         return rpDecline;
++
++    // The subprocess hook reads from the build store, not the evaluation
++    // store. Import the derivation closure before handing it to the hook.
++    // In-memory remote BuildDerivation requests may have neither copy.
++    if (!worker.store.isValidPath(drvPath)) {
++        if (!worker.evalStore.isValidPath(drvPath))
++            return rpDecline;
++        copyClosure(worker.evalStore, worker.store, StorePathSet{drvPath}, NoRepair, NoCheckSigs);
++    }
+ 
+     if (!worker.hook)
+         worker.hook = std::make_unique<HookInstance>(
 diff --git a/src/libstore/include/nix/store/build/derivation-builder.hh b/src/libstore/include/nix/store/build/derivation-builder.hh
-index eedfc0c..2e3b268 100644
 --- a/src/libstore/include/nix/store/build/derivation-builder.hh
 +++ b/src/libstore/include/nix/store/build/derivation-builder.hh
-@@ -29,6 +29,13 @@ void rethrowExceptionAsError();
-  */
+@@ -30,6 +30,13 @@
  void handleChildException(bool sendException);
  
-+/**
+ /**
 + * Exit status with which an external builder declines a build, asking
 + * Nix to build it locally instead (used when no remote worker can serve
 + * the derivation's system).
 + */
 +constexpr int externalBuilderDeclinedExitCode = 222;
 +
- /**
++/**
   * Denotes a build failure that stemmed from the builder exiting with a
   * failing exist status.
+  */
 diff --git a/src/libstore/unix/build/external-derivation-builder.cc b/src/libstore/unix/build/external-derivation-builder.cc
-index b42c89b..e1a3a89 100644
 --- a/src/libstore/unix/build/external-derivation-builder.cc
 +++ b/src/libstore/unix/build/external-derivation-builder.cc
-@@ -20,6 +20,13 @@ struct ExternalDerivationBuilder : UnixDerivationBuilderImpl
+@@ -20,6 +20,13 @@
          experimentalFeatureSettings.require(Xp::ExternalBuilders);
      }
  
@@ -69,7 +87,7 @@ index b42c89b..e1a3a89 100644
      std::filesystem::path tmpDirInSandbox() override
      {
          /* In a sandbox, for determinism, always use the same temporary
-@@ -35,9 +42,6 @@ struct ExternalDerivationBuilder : UnixDerivationBuilderImpl
+@@ -35,9 +42,6 @@
  
      void startChild() override
      {
@@ -79,7 +97,7 @@ index b42c89b..e1a3a89 100644
          auto json = nlohmann::json::object();
  
          json.emplace("version", 1);
-@@ -109,6 +113,23 @@ struct ExternalDerivationBuilder : UnixDerivationBuilderImpl
+@@ -109,6 +113,23 @@
              }
          });
      }
