@@ -20,16 +20,14 @@ pkgs.symlinkJoin {
       rm "$executable"
       makeWrapper ${nix}/bin/nix "$executable" \
         --argv0 "$commandName" \
-        --suffix NIX_CONFIG $'\n' \
-        "extra-plugin-files = ${plugin}/lib/nix/plugins/nix-tarmac-loader.so" \
+        --run ${
+          pkgs.lib.escapeShellArg (
+            import ./tarmac-wrapper-init.nix {
+              pluginFile = "${plugin}/lib/nix/plugins/nix-tarmac-loader.so";
+            }
+          )
+        } \
         --suffix NIX_CONFIG $'\n' "eval-store = tarmac://" \
-        --run 'if [ -n "''${NIX_BUILD_TOP-}" ] && [ -z "''${XDG_CACHE_HOME+x}" ]; then
-          # Builders normally have a read-only /homeless-shelter HOME.
-          # A caller-supplied HOME may not exist yet; preserve its isolation.
-          case "''${HOME-}" in
-            /homeless-shelter|"") export XDG_CACHE_HOME="$NIX_BUILD_TOP/.cache" ;;
-          esac
-        fi' \
         --run 'task_existing_drv=false
           task_all_drvs_valid=true
           task_evaluate_expression=false

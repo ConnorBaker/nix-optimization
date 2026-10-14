@@ -94,3 +94,7 @@ Summary
     1.14 ± 0.00 times faster than baseline/bin/nix eval -f ../nixpkgs/nixos/release.nix closures.gnome --no-eval-cache --store dummy:// --eval-store dummy://?read-only=false
     1.15 ± 0.01 times faster than gcc/bin/nix eval -f ../nixpkgs/nixos/release.nix closures.gnome --no-eval-cache --store dummy:// --eval-store dummy://?read-only=false
 ```
+
+The CLI and embedded evaluator can inherit `NIX_CONFIG` from another Nix generation, particularly when a command is launched through `nix shell`. `tarmac-wrapper-init.nix` removes inherited Tarmac loader/native-plugin entries and appends exactly one loader for the selected Nix scope. Other plugins and settings remain configured. It handles plugin directories, including mixed directories, and shares the sandbox-cache setup with consumers such as nix-eval-jobs. This prevents two different Tarmac builds from registering the same store in one process.
+
+`tests/tarmac-inheritance.sh` checks eleven inherited configurations, gRPC coexistence, preserved settings, CLI and embedded evaluation, and nested `nix shell` invocation. The nixos-configs consumer exposes it as `checks.x86_64-linux.tarmac-inherited-plugins`.
