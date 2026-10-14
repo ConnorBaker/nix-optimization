@@ -1,0 +1,105 @@
+diff --git a/src/libstore/build/derivation-building-goal.cc b/src/libstore/build/derivation-building-goal.cc
+index 9cc3016..f36c488 100644
+--- a/src/libstore/build/derivation-building-goal.cc
++++ b/src/libstore/build/derivation-building-goal.cc
+@@ -27,6 +27,9 @@
+ #include <sys/types.h>
+ #include <fcntl.h>
+ #include <unistd.h>
++#ifndef _WIN32
++#  include <sys/wait.h>
++#endif
+ 
+ #include <nlohmann/json.hpp>
+ 
+@@ -1055,6 +1058,20 @@ Goal::Co<DerivationBuildingGoal::LocalBuildOutcome> DerivationBuildingGoal::buil
+     if (!statusOk(status)) {
+         builder->cleanupBuild(false);
+         builder.reset();
++        if (localBuildCap.externalBuilder && WIFEXITED(status)
++            && WEXITSTATUS(status) == externalBuilderDeclinedExitCode) {
++            bool platformOk = drv->platform == settings.thisSystem.get()
++                              || settings.extraPlatforms.get().count(drv->platform) || drv->isBuiltin();
++            auto required = drvOptions.getRequiredSystemFeatures(*drv);
++            auto & available = worker.store.config.systemFeatures.get();
++            bool featuresOk =
++                std::ranges::all_of(required, [&](const std::string & f) { return available.count(f); });
++            if (worker.settings.maxBuildJobs.get() != 0 && platformOk && featuresOk) {
++                localBuildCap.externalBuilder = nullptr;
++                co_return co_await buildLocally(
++                    std::move(localBuildCap), inputPaths, initialOutputs, drvOptions, std::move(outputLocks));
++            }
++        }
+         outputLocks.unlock();
+         co_return fixupBuilderFailureErrorMessage(
+             {
+diff --git a/src/libstore/include/nix/store/build/derivation-builder.hh b/src/libstore/include/nix/store/build/derivation-builder.hh
+index eedfc0c..2e3b268 100644
+--- a/src/libstore/include/nix/store/build/derivation-builder.hh
++++ b/src/libstore/include/nix/store/build/derivation-builder.hh
+@@ -29,6 +29,13 @@ void rethrowExceptionAsError();
+  */
+ void handleChildException(bool sendException);
+ 
++/**
++ * Exit status with which an external builder declines a build, asking
++ * Nix to build it locally instead (used when no remote worker can serve
++ * the derivation's system).
++ */
++constexpr int externalBuilderDeclinedExitCode = 222;
++
+ /**
+  * Denotes a build failure that stemmed from the builder exiting with a
+  * failing exist status.
+diff --git a/src/libstore/unix/build/external-derivation-builder.cc b/src/libstore/unix/build/external-derivation-builder.cc
+index b42c89b..e1a3a89 100644
+--- a/src/libstore/unix/build/external-derivation-builder.cc
++++ b/src/libstore/unix/build/external-derivation-builder.cc
+@@ -20,6 +20,13 @@ struct ExternalDerivationBuilder : UnixDerivationBuilderImpl
+         experimentalFeatureSettings.require(Xp::ExternalBuilders);
+     }
+ 
++    void prepareSandbox() override
++    {
++        /* Sandboxing (including uid-range support) is the external
++           builder's responsibility; don't reject derivations the
++           local platform could not sandbox itself. */
++    }
++
+     std::filesystem::path tmpDirInSandbox() override
+     {
+         /* In a sandbox, for determinism, always use the same temporary
+@@ -35,9 +42,6 @@ struct ExternalDerivationBuilder : UnixDerivationBuilderImpl
+ 
+     void startChild() override
+     {
+-        if (drvOptions.getRequiredSystemFeatures(drv).count("recursive-nix"))
+-            throw Error("'recursive-nix' is not supported yet by external derivation builders");
+-
+         auto json = nlohmann::json::object();
+ 
+         json.emplace("version", 1);
+@@ -109,6 +113,23 @@ struct ExternalDerivationBuilder : UnixDerivationBuilderImpl
+             }
+         });
+     }
++    SingleDrvOutputs registerOutputs(LocalStore & localStore) override
++    {
++        auto resultJsonPath = topTmpDir / "result.json";
++        if (pathExists(resultJsonPath)) {
++            auto result = nlohmann::json::parse(readFile(resultJsonPath));
++            auto added = result.find("addedPaths");
++            if (added != result.end() && added->is_array()) {
++                std::promise<void> done;
++                done.set_value();
++                auto ready = done.get_future().share();
++                auto state = state_.lock();
++                for (auto & p : *added)
++                    state->addedPaths.emplace(store->parseStorePath(p.get<std::string>()), ready);
++            }
++        }
++        return DerivationBuilderImpl::registerOutputs(localStore);
++    }
+ };
+ 
+ } // namespace
