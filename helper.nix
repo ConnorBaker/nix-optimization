@@ -137,7 +137,12 @@ lib.makeOverridable (
       dontStrip = true;
       separateDebugInfo = false;
 
-      pname = prevAttrs.pname + suffix;
+      # Upstream unit-test runners derive the installed executable's name
+      # from pname. Meson still installs e.g. nix-store-tests, without a PGO
+      # suffix, so vary the derivation name instead for these components.
+      pname = prevAttrs.pname + lib.optionalString (!lib.hasSuffix "-tests" prevAttrs.pname) suffix;
+      ${if lib.hasSuffix "-tests" prevAttrs.pname then "name" else null} =
+        "${prevAttrs.pname}${suffix}-${prevAttrs.version}";
 
       preferLocalBuild = true;
       allowSubstitutes = false;
