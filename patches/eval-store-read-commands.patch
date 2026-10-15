@@ -1,0 +1,215 @@
+diff --git a/src/libcmd/command.cc b/src/libcmd/command.cc
+index b12481e566..1fcd2d6765 100644
+--- a/src/libcmd/command.cc
++++ b/src/libcmd/command.cc
+@@ -223,6 +223,7 @@ BuiltPathsCommand::BuiltPathsCommand(bool recursive)
+ void BuiltPathsCommand::run(ref<Store> store, Installables && installables)
+ {
+     BuiltPaths rootPaths, allPaths;
++    auto operationStore = store;
+ 
+     if (all) {
+         if (installables.size())
+@@ -235,6 +236,15 @@ void BuiltPathsCommand::run(ref<Store> store, Installables && installables)
+         rootPaths = Installable::toBuiltPaths(getEvalStore(), store, realiseMode, operateOn, installables);
+         allPaths = rootPaths;
+ 
++        if (operateOn == OperateOn::Derivation) {
++            StorePathSet drvPaths;
++            for (auto & root : rootPaths) {
++                auto rootOutPaths = root.outPaths();
++                drvPaths.insert(rootOutPaths.begin(), rootOutPaths.end());
++            }
++            operationStore = Installable::getStoreForDerivations(getEvalStore(), store, drvPaths);
++        }
++
+         if (recursive) {
+             // XXX: This only computes the store path closure, ignoring
+             // intermediate realisations
+@@ -243,13 +253,13 @@ void BuiltPathsCommand::run(ref<Store> store, Installables && installables)
+                 auto rootFromThis = root.outPaths();
+                 pathsRoots.insert(rootFromThis.begin(), rootFromThis.end());
+             }
+-            store->computeFSClosure(pathsRoots, pathsClosure);
++            operationStore->computeFSClosure(pathsRoots, pathsClosure);
+             for (auto & path : pathsClosure)
+                 allPaths.emplace_back(BuiltPath::Opaque{path});
+         }
+     }
+ 
+-    run(store, std::move(allPaths), std::move(rootPaths));
++    run(operationStore, std::move(allPaths), std::move(rootPaths));
+ }
+ 
+ StorePathsCommand::StorePathsCommand(bool recursive)
+diff --git a/src/libcmd/include/nix/cmd/installables.hh b/src/libcmd/include/nix/cmd/installables.hh
+index 530334e037..150dfd080b 100644
+--- a/src/libcmd/include/nix/cmd/installables.hh
++++ b/src/libcmd/include/nix/cmd/installables.hh
+@@ -176,8 +176,19 @@ struct Installable
+     static StorePath toStorePath(
+         ref<Store> evalStore, ref<Store> store, Realise mode, OperateOn operateOn, ref<Installable> installable);
+ 
+-    static std::set<StorePath>
+-    toDerivations(ref<Store> store, const Installables & installables, bool useDeriver = false);
++    static std::set<StorePath> toDerivations(
++        ref<Store> evalStore,
++        ref<Store> store,
++        const Installables & installables,
++        bool useDeriver = false);
++
++    /**
++     * Choose the store containing a complete set of derivations. Evaluation
++     * results normally live in `evalStore`, while explicit store-path
++     * arguments may refer to derivations already present in `store`.
++     */
++    static ref<Store>
++    getStoreForDerivations(ref<Store> evalStore, ref<Store> store, const StorePathSet & drvPaths);
+ 
+     static BuiltPaths toBuiltPaths(
+         ref<Store> evalStore, ref<Store> store, Realise mode, OperateOn operateOn, const Installables & installables);
+diff --git a/src/libcmd/installables.cc b/src/libcmd/installables.cc
+index 9bf970366e..5f8b5e46a4 100644
+--- a/src/libcmd/installables.cc
++++ b/src/libcmd/installables.cc
+@@ -22,6 +22,7 @@
+ #include "nix/fetchers/registry.hh"
+ #include "nix/store/build-result.hh"
+ 
++#include <algorithm>
+ #include <nlohmann/json.hpp>
+ 
+ #include "nix/util/strings-inline.hh"
+@@ -669,7 +670,7 @@ BuiltPaths Installable::toBuiltPaths(
+             settings.readOnlyMode = true;
+ 
+         BuiltPaths res;
+-        for (auto & drvPath : Installable::toDerivations(store, installables, true))
++        for (auto & drvPath : Installable::toDerivations(evalStore, store, installables, true))
+             res.emplace_back(BuiltPath::Opaque{drvPath});
+         return res;
+     }
+@@ -708,7 +709,8 @@ StorePath Installable::toStorePath(
+     return *paths.begin();
+ }
+ 
+-StorePathSet Installable::toDerivations(ref<Store> store, const Installables & installables, bool useDeriver)
++StorePathSet Installable::toDerivations(
++    ref<Store> evalStore, ref<Store> store, const Installables & installables, bool useDeriver)
+ {
+     StorePathSet drvPaths;
+ 
+@@ -722,13 +724,33 @@ StorePathSet Installable::toDerivations(ref<Store> store, const Installables & i
+                             : useDeriver           ? getDeriver(store, *i, bo.path)
+                                          : throw Error("argument '%s' did not evaluate to a derivation", i->what()));
+                     },
+-                    [&](const DerivedPath::Built & bfd) { drvPaths.insert(resolveDerivedPath(*store, *bfd.drvPath)); },
++                    [&](const DerivedPath::Built & bfd) {
++                        drvPaths.insert(resolveDerivedPath(*store, *bfd.drvPath, &*evalStore));
++                    },
+                 },
+                 b.path.raw());
+ 
+     return drvPaths;
+ }
+ 
++ref<Store>
++Installable::getStoreForDerivations(ref<Store> evalStore, ref<Store> store, const StorePathSet & drvPaths)
++{
++    if (&*evalStore == &*store)
++        return store;
++
++    auto containsAll = [&](Store & candidate) {
++        return std::ranges::all_of(drvPaths, [&](const auto & drvPath) { return candidate.isValidPath(drvPath); });
++    };
++
++    if (containsAll(*evalStore))
++        return evalStore;
++    if (containsAll(*store))
++        return store;
++
++    throw Error("the requested derivations are not all available in either the evaluation store or the build store");
++}
++
+ RawInstallablesCommand::RawInstallablesCommand()
+ {
+     addFlag({
+diff --git a/src/nix/derivation-show.cc b/src/nix/derivation-show.cc
+index 5880c6c8f1..3d255f8366 100644
+--- a/src/nix/derivation-show.cc
++++ b/src/nix/derivation-show.cc
+@@ -44,11 +44,13 @@ struct CmdShowDerivation : InstallablesCommand, MixPrintJSON
+ 
+     void run(ref<Store> store, Installables && installables) override
+     {
+-        auto drvPaths = Installable::toDerivations(store, installables, true);
++        auto evalStore = getEvalStore();
++        auto drvPaths = Installable::toDerivations(evalStore, store, installables, true);
++        auto drvStore = Installable::getStoreForDerivations(evalStore, store, drvPaths);
+ 
+         if (recursive) {
+             StorePathSet closure;
+-            store->computeFSClosure(drvPaths, closure);
++            drvStore->computeFSClosure(drvPaths, closure);
+             drvPaths = std::move(closure);
+         }
+ 
+@@ -58,7 +60,7 @@ struct CmdShowDerivation : InstallablesCommand, MixPrintJSON
+             if (!drvPath.isDerivation())
+                 continue;
+ 
+-            jsonRoot[drvPath.to_string()] = store->readDerivation(drvPath);
++            jsonRoot[drvPath.to_string()] = drvStore->readDerivation(drvPath);
+         }
+         printJSON(
+             nlohmann::json{
+diff --git a/src/nix/develop.cc b/src/nix/develop.cc
+index f65ae25adf..c8ff5abd3c 100644
+--- a/src/nix/develop.cc
++++ b/src/nix/develop.cc
+@@ -481,7 +481,7 @@ struct Common : InstallableCommand, MixProfile
+         if (path && hasSuffix(path->to_string(), "-env"))
+             return *path;
+         else {
+-            auto drvs = Installable::toDerivations(store, {installable});
++            auto drvs = Installable::toDerivations(getEvalStore(), store, {installable});
+ 
+             if (drvs.size() != 1)
+                 throw Error(
+diff --git a/src/nix/store-copy-log.cc b/src/nix/store-copy-log.cc
+index bcdbee75f2..1725754b2f 100644
+--- a/src/nix/store-copy-log.cc
++++ b/src/nix/store-copy-log.cc
+@@ -27,7 +27,7 @@ struct CmdCopyLog : virtual CopyCommand, virtual InstallablesCommand
+         auto dstStore = getDstStore();
+         auto & dstLogStore = require<LogStore>(*dstStore);
+ 
+-        for (auto & drvPath : Installable::toDerivations(getEvalStore(), installables, true)) {
++        for (auto & drvPath : Installable::toDerivations(getEvalStore(), srcStore, installables, true)) {
+             if (auto log = srcLogStore.getBuildLog(drvPath))
+                 dstLogStore.addBuildLog(drvPath, *log);
+             else
+diff --git a/tests/functional/eval-store.sh b/tests/functional/eval-store.sh
+index ce7728e15c..76607be123 100755
+--- a/tests/functional/eval-store.sh
++++ b/tests/functional/eval-store.sh
+@@ -11,6 +11,19 @@ needLocalStore "“--eval-store” doesn't achieve much with the daemon"
+ 
+ eval_store=$TEST_ROOT/eval-store
+ 
++# Commands that inspect derivations must read metadata from the evaluation
++# store without first realizing or copying the derivations to the build store.
++drv=$(nix-instantiate dependencies.nix --eval-store "$eval_store")
++(! test -e "$NIX_STORE_DIR/$(basename "$drv")")
++nix derivation show --eval-store "$eval_store" -f dependencies.nix |
++    jq --exit-status --arg drv "$(basename "$drv")" '.derivations[$drv] != null'
++nix derivation show --recursive --eval-store "$eval_store" -f dependencies.nix |
++    jq --exit-status '.derivations | length > 1'
++nix path-info --derivation --eval-store "$eval_store" -f dependencies.nix |
++    grep -Fx "$drv"
++nix path-info --derivation --json --json-format 1 --eval-store "$eval_store" -f dependencies.nix |
++    jq --exit-status --arg drv "$drv" '.[$drv] != null'
++
+ # The build store has not seen the .drv files yet. queryMissing must read
+ # them from the eval store instead of reporting them as unknown.
+ out=$(nix build -f dependencies.nix --eval-store "$eval_store" --dry-run 2>&1)

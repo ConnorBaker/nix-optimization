@@ -130,6 +130,7 @@ task_existing_output=$("$task_nix" build "$task_existing_drv^*" --no-link --prin
 test "$(cat "$task_existing_output")" = "build works $task_tmp-imported"
 "$task_nix" derivation show "$task_existing_drv" >"$task_tmp/existing-drv.json"
 test -s "$task_tmp/existing-drv.json"
+"$task_nix" path-info --derivation "$task_existing_drv" | grep -Fx "$task_existing_drv"
 task_existing_legacy=$("$task_nix_build" --no-out-link --builders '' "$task_existing_drv")
 test "$task_existing_legacy" = "$task_existing_output"
 
@@ -140,6 +141,19 @@ if "$(dirname "$task_nix")/nix-store" --check-validity "$task_cached_drv" 2>/dev
   printf 'cached-only derivation unexpectedly exists in the build store\n' >&2
   exit 1
 fi
+"$task_nix" derivation show "$task_cached_drv" |
+  jq --exit-status --arg drv "$(basename "$task_cached_drv")" '.derivations[$drv] != null'
+"$task_nix" derivation show -f "$task_tmp/build.nix" \
+  --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-cached" |
+  jq --exit-status --arg drv "$(basename "$task_cached_drv")" '.derivations[$drv] != null'
+"$task_nix" derivation show --recursive "$task_cached_drv" |
+  jq --exit-status --arg drv "$(basename "$task_cached_drv")" '.derivations[$drv] != null'
+"$task_nix" path-info --derivation "$task_cached_drv" | grep -Fx "$task_cached_drv"
+"$task_nix" path-info --derivation -f "$task_tmp/build.nix" \
+  --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-cached" |
+  grep -Fx "$task_cached_drv"
+"$task_nix" path-info --derivation --json --json-format 1 "$task_cached_drv" |
+  jq --exit-status --arg drv "$task_cached_drv" '.[$drv] != null'
 task_cached_output=$("$task_nix" build "$task_cached_drv^*" --no-link --print-out-paths --builders '')
 test "$(cat "$task_cached_output")" = "build works $task_tmp-cached"
-printf 'Tarmac evaluation, persistence, concurrent writers, explicit override, flake checks, bundles, the REPL, development environments, and modern and legacy builds passed.\n'
+printf 'Tarmac evaluation, read-only derivation inspection, persistence, concurrent writers, explicit override, flake checks, bundles, the REPL, development environments, and modern and legacy builds passed.\n'
