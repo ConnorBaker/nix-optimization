@@ -268,6 +268,7 @@ lib.makeOverridable (
         ./patches/remote-query-partial-eval-store.patch
         ./patches/develop-output-build-store.patch
         ./patches/eval-store-command-builders.patch
+        ./patches/eval-store-read-commands.patch
         ./patches/upstream-clang-vtables.patch
         ./patches/tribuchet-external-builders.patch
         ./patches/sergei-tarball-performance.patch
