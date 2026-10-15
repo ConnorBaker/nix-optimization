@@ -7,10 +7,12 @@ task_extra_plugin=${3:-}
 task_tmp=$(mktemp -d)
 trap 'rm -rf "$task_tmp"' EXIT
 export XDG_CACHE_HOME="$task_tmp/cache"
-export NIX_CONFIG=$'experimental-features = nix-command flakes\nwarn-dirty = false'
+# Ignore ambient plugins: Nix C++ plugins must match this package's ABI. The
+# wrapper adds its matching Tarmac loader through extra-plugin-files below.
+export NIX_CONFIG=$'experimental-features = nix-command flakes\nplugin-files =\nwarn-dirty = false'
 
 # A separately configured plugin (e.g. gRPC) must survive the wrapper's default.
-if [[ -n "$task_extra_plugin" ]]; then
+if [[ -n $task_extra_plugin ]]; then
   task_config="${NIX_CONFIG}"$'\nplugin-files = '"$task_extra_plugin"
   task_plugins=$(NIX_CONFIG="$task_config" "$task_nix" config show plugin-files)
   [[ " $task_plugins " == *" $task_extra_plugin "* ]]
@@ -22,7 +24,7 @@ fi
 task_path=$("$task_nix" eval --raw --expr 'builtins.toFile "tarmac-default-eval-test" "default eval store works"')
 test ! -e "$task_path"
 test -d "$XDG_CACHE_HOME/nix/tarmac"
-"$task_nix" eval --raw --expr 'builtins.readFile (builtins.toFile "tarmac-default-eval-test" "default eval store works")' > "$task_tmp/read"
+"$task_nix" eval --raw --expr 'builtins.readFile (builtins.toFile "tarmac-default-eval-test" "default eval store works")' >"$task_tmp/read"
 test "$(cat "$task_tmp/read")" = 'default eval store works'
 
 # A separate process reopens the persistent cache.
@@ -33,7 +35,7 @@ task_pids=()
 for task_index in 1 2 3 4; do
   "$task_nix" eval --raw --expr \
     "builtins.readFile (builtins.toFile \"tarmac-concurrent-$task_index\" \"writer $task_index\")" \
-    > "$task_tmp/writer-$task_index" &
+    >"$task_tmp/writer-$task_index" &
   task_pids+=("$!")
 done
 for task_pid in "${task_pids[@]}"; do
@@ -52,7 +54,7 @@ task_legacy="$(dirname "$task_nix")/nix-instantiate"
 test "$("$task_legacy" --eval --read-write-mode --strict --expr 'builtins.readFile (builtins.toFile "tarmac-legacy-eval-test" "legacy works")')" = '"legacy works"'
 
 # Derivations and writeText inputs are copied from the eval store on demand.
-cat > "$task_tmp/build.nix" <<'NIX'
+cat >"$task_tmp/build.nix" <<'NIX'
 { nixpkgs, nonce }:
 let
   pkgs = import (builtins.toPath nixpkgs) { };
@@ -67,6 +69,12 @@ task_output=$("$task_nix" build --no-link --print-out-paths --builders '' \
   -f "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp")
 test "$(cat "$task_output")" = "build works $task_tmp"
 
+# `nix develop` writes its synthetic environment derivation to the eval store,
+# then realizes and reads the output from the ordinary build store.
+"$task_nix" develop --builders '' -f "$task_tmp/build.nix" \
+  --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-develop" \
+  -c true
+
 # Legacy nix-build also transfers its evaluation inputs to the build store.
 task_nix_build="$(dirname "$task_nix")/nix-build"
 task_legacy_output=$("$task_nix_build" --no-out-link --builders '' \
@@ -80,7 +88,7 @@ task_existing_drv=$("$task_nix_instantiate" --eval-store auto \
   "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp-imported")
 task_existing_output=$("$task_nix" build "$task_existing_drv^*" --no-link --print-out-paths --builders '')
 test "$(cat "$task_existing_output")" = "build works $task_tmp-imported"
-"$task_nix" derivation show "$task_existing_drv" > "$task_tmp/existing-drv.json"
+"$task_nix" derivation show "$task_existing_drv" >"$task_tmp/existing-drv.json"
 test -s "$task_tmp/existing-drv.json"
 task_existing_legacy=$("$task_nix_build" --no-out-link --builders '' "$task_existing_drv")
 test "$task_existing_legacy" = "$task_existing_output"
@@ -94,4 +102,4 @@ if "$(dirname "$task_nix")/nix-store" --check-validity "$task_cached_drv" 2>/dev
 fi
 task_cached_output=$("$task_nix" build "$task_cached_drv^*" --no-link --print-out-paths --builders '')
 test "$(cat "$task_cached_output")" = "build works $task_tmp-cached"
-printf 'Tarmac default evaluation, persistence, concurrent writers, explicit override, legacy evaluation, and modern and legacy builds passed.\n'
+printf 'Tarmac default evaluation, persistence, concurrent writers, explicit override, legacy evaluation, development environments, and modern and legacy builds passed.\n'

@@ -14,8 +14,8 @@ task_log="$task_tmp/dispatch.log"
 touch "$task_log"
 chmod 666 "$task_log"
 
-printf '#!%s\n' "$task_python" > "$task_handler"
-cat >> "$task_handler" <<'PY'
+printf '#!%s\n' "$task_python" >"$task_handler"
+cat >>"$task_handler" <<'PY'
 import json, pathlib, sys
 request = json.loads(pathlib.Path(sys.argv[1]).read_text())
 # External helpers own this handshake; Tribuchet attach emits it after
@@ -72,7 +72,7 @@ task_output=$(task_build "$(task_expr decline)")
 test "$(cat "$task_store/nix/store/$(basename "$task_output")")" = local
 test "$(grep -c '^decline$' "$task_log")" = 1
 
-printf 'inner payload\n' > "$task_tmp/payload"
+printf 'inner payload\n' >"$task_tmp/payload"
 task_added=$("$task_nix" --store "$task_store" \
   --extra-experimental-features nix-command store add-path "$task_tmp/payload")
 task_added="/nix/store/$(basename "$task_added")"
@@ -85,15 +85,15 @@ test "$(cat "$task_store/nix/store/$(basename "$task_output")")" = "$task_added"
 # A recursive build through the ordinary SSH hook must copy new references
 # back too. localhost invokes the stdio daemon directly, without an SSH server.
 task_remote_store="$task_tmp/remote-store"
-printf 'remote-only payload\n' > "$task_tmp/remote-payload"
+printf 'remote-only payload\n' >"$task_tmp/remote-payload"
 task_remote_added=$("$task_nix" --store "$task_remote_store" \
   --extra-experimental-features nix-command store add-path "$task_tmp/remote-payload")
 task_remote_added="/nix/store/$(basename "$task_remote_added")"
 task_remote_daemon="$task_tmp/remote-daemon"
-printf '#!%s\n' "$(command -v bash)" > "$task_remote_daemon"
+printf '#!%s\n' "$(command -v bash)" >"$task_remote_daemon"
 printf 'export NIX_CONFIG=%q\n' \
-  $'experimental-features = nix-command external-builders recursive-nix\nsandbox = false\nmax-jobs = 1\nexternal-builders = '"$task_external" >> "$task_remote_daemon"
-printf 'exec %q "$@"\n' "$(dirname "$task_nix")/nix-daemon" >> "$task_remote_daemon"
+  $'experimental-features = nix-command external-builders recursive-nix\nsandbox = false\nmax-jobs = 1\nexternal-builders = '"$task_external" >>"$task_remote_daemon"
+printf 'exec %q "$@"\n' "$(dirname "$task_nix")/nix-daemon" >>"$task_remote_daemon"
 chmod 755 "$task_remote_daemon"
 task_remote_uri="ssh-ng://localhost?remote-store=$task_remote_store&remote-program=$task_remote_daemon"
 task_output=$("$task_nix" build --store "$task_store" --eval-store "$task_tmp/eval-store" \
