@@ -27,23 +27,23 @@ ln -s "$task_grpc/nix-grpc-store-loader.so" "$task_tmp/mixed/nix-grpc-store-load
 task_base=$'experimental-features = nix-command flakes\nconnect-timeout = 17\ncores = 2\nextra-plugin-files = '"$task_grpc"
 
 check_inherited() {
-	local task_config=$1 task_paths task_path task_count=0
-	task_paths=$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" config show plugin-files)
-	for task_path in $task_paths; do
-		[[ "$task_path" != "$task_tmp"/previous/* ]]
-		if [[ "$task_path" == "$task_loader" ]]; then
-			task_count=$((task_count + 1))
-		fi
-	done
-	test "$task_count" -eq 1
-	[[ " $task_paths " == *" $task_grpc "* || " $task_paths " == *" $task_tmp/mixed/nix-grpc-store-loader.so "* ]]
-	test "$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" config show connect-timeout)" = 17
-	test "$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" config show cores)" = 2
-	test "$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" eval --raw --expr \
-		'builtins.readFile (builtins.toFile "plugin-inheritance" "selected-tarmac-ok")')" = selected-tarmac-ok
-	NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_jobs" --workers 1 --expr \
-		'{ sample = derivation { name = "plugin-inheritance"; system = "x86_64-linux"; builder = "/bin/sh"; }; }' >"$task_tmp/jobs.jsonl"
-	jq -e '.attr == "sample" and .error == null and (.drvPath | endswith(".drv"))' "$task_tmp/jobs.jsonl" >/dev/null
+  local task_config=$1 task_paths task_path task_count=0
+  task_paths=$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" config show plugin-files)
+  for task_path in $task_paths; do
+    [[ $task_path != "$task_tmp"/previous/* ]]
+    if [[ $task_path == "$task_loader" ]]; then
+      task_count=$((task_count + 1))
+    fi
+  done
+  test "$task_count" -eq 1
+  [[ " $task_paths " == *" $task_grpc "* || " $task_paths " == *" $task_tmp/mixed/nix-grpc-store-loader.so "* ]]
+  test "$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" config show connect-timeout)" = 17
+  test "$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" config show cores)" = 2
+  test "$(NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_nix" eval --raw --expr \
+    'builtins.readFile (builtins.toFile "plugin-inheritance" "selected-tarmac-ok")')" = selected-tarmac-ok
+  NIX_CONFIG="$task_base"$'\n'"$task_config" "$task_jobs" --workers 1 --expr \
+    '{ sample = derivation { name = "plugin-inheritance"; system = "x86_64-linux"; builder = "/bin/sh"; }; }' >"$task_tmp/jobs.jsonl"
+  jq -e '.attr == "sample" and .error == null and (.drvPath | endswith(".drv"))' "$task_tmp/jobs.jsonl" >/dev/null
 }
 
 check_inherited "extra-plugin-files = $task_old_loader"
@@ -61,6 +61,6 @@ check_inherited 'extra-plugin-files = /nix/store/0000000000000000000000000000000
 # nix shell passes its NIX_CONFIG to the launched command. Re-entering the
 # selected wrapper must remain idempotent, as in nixos-rebuild bootstrapping.
 NIX_CONFIG="$task_base"$'\nextra-plugin-files = '"$task_old_loader" \
-	"$task_nix" shell --expr '[]' --command "$task_nix" config show plugin-files >"$task_tmp/nested-plugins"
+  "$task_nix" shell --expr '[]' --command "$task_nix" config show plugin-files >"$task_tmp/nested-plugins"
 test "$(tr ' ' '\n' <"$task_tmp/nested-plugins" | grep -Fc "$task_loader")" -eq 1
 printf '11 inherited-plugin configurations plus nested invocation passed for CLI and nix-eval-jobs.\n'
