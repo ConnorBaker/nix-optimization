@@ -1,0 +1,277 @@
+From 1bcd1631033a424fac60e5cfcb51d0c76b30989d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rg=20Thalheim?= <joerg@thalheim.io>
+Date: Sun, 6 Sep 2026 12:04:14 +0200
+Subject: [PATCH] queryMissing: read derivations from the eval store
+
+With `--eval-store`, `nix build --store ssh-ng://...` printed
+
+    don't know how to build these paths:
+      /nix/store/...-foo.drv
+
+and then built them anyway. printMissing() runs before the builder has
+copied any .drv to the destination store, and Store::queryMissing() only
+looked there. `nix flake check` uses the same result to decide what to
+build, so with an eval store it silently skipped those checks.
+
+Pass the eval store down like queryPartialDerivationOutputMap() already
+does. RemoteStore cannot forward it to the daemon and falls back to the
+client-side traversal in that case.
+---
+ src/libcmd/installables.cc                     |  4 ++--
+ src/libmain/include/nix/main/shared.hh         |  3 ++-
+ src/libmain/shared.cc                          |  4 ++--
+ src/libstore/include/nix/store/remote-store.hh |  2 +-
+ src/libstore/include/nix/store/store-api.hh    |  5 ++++-
+ src/libstore/misc.cc                           | 11 +++++++----
+ src/libstore/remote-store.cc                   |  7 ++++---
+ src/libstore/restricted-store.cc               |  6 +++---
+ src/nix/build.cc                               |  2 +-
+ src/nix/flake.cc                               |  2 +-
+ src/nix/nix-build/nix-build.cc                 |  2 +-
+ tests/functional/eval-store.sh                 |  6 ++++++
+ 12 files changed, 34 insertions(+), 20 deletions(-)
+
+diff --git a/src/libcmd/installables.cc b/src/libcmd/installables.cc
+index f6e0b1b381..9bf970366e 100644
+--- a/src/libcmd/installables.cc
++++ b/src/libcmd/installables.cc
+@@ -599,7 +599,7 @@ std::vector<std::pair<ref<Installable>, BuiltPathWithResult>> Installable::build
+ 
+     case Realise::Nothing:
+     case Realise::Derivation:
+-        printMissing(store, pathsToBuild, lvlError);
++        printMissing(store, pathsToBuild, lvlError, &*evalStore);
+ 
+         for (auto & path : pathsToBuild) {
+             for (auto & aux : backmap[path]) {
+@@ -629,7 +629,7 @@ std::vector<std::pair<ref<Installable>, BuiltPathWithResult>> Installable::build
+ 
+     case Realise::Outputs: {
+         if (settings.printMissing)
+-            printMissing(store, pathsToBuild, lvlInfo);
++            printMissing(store, pathsToBuild, lvlInfo, &*evalStore);
+ 
+         auto buildResults = store->getBuilder(evalStore)->buildPathsWithResults(pathsToBuild, bMode);
+         throwBuildErrors(buildResults, *store);
+diff --git a/src/libmain/include/nix/main/shared.hh b/src/libmain/include/nix/main/shared.hh
+index 7a7ecb29c3..f27a52026e 100644
+--- a/src/libmain/include/nix/main/shared.hh
++++ b/src/libmain/include/nix/main/shared.hh
+@@ -36,7 +36,8 @@ void printGCWarning();
+ class Store;
+ struct MissingPaths;
+ 
+-void printMissing(ref<Store> store, const std::vector<DerivedPath> & paths, Verbosity lvl = lvlInfo);
++void printMissing(
++    ref<Store> store, const std::vector<DerivedPath> & paths, Verbosity lvl = lvlInfo, Store * evalStore = nullptr);
+ 
+ void printMissing(ref<Store> store, const MissingPaths & missing, Verbosity lvl = lvlInfo);
+ 
+diff --git a/src/libmain/shared.cc b/src/libmain/shared.cc
+index f0e3365c24..1872bfb39b 100644
+--- a/src/libmain/shared.cc
++++ b/src/libmain/shared.cc
+@@ -54,9 +54,9 @@ void printGCWarning()
+         "the result might be removed by the garbage collector");
+ }
+ 
+-void printMissing(ref<Store> store, const std::vector<DerivedPath> & paths, Verbosity lvl)
++void printMissing(ref<Store> store, const std::vector<DerivedPath> & paths, Verbosity lvl, Store * evalStore)
+ {
+-    printMissing(store, store->queryMissing(paths), lvl);
++    printMissing(store, store->queryMissing(paths, evalStore), lvl);
+ }
+ 
+ void printMissing(ref<Store> store, const MissingPaths & missing, Verbosity lvl)
+diff --git a/src/libstore/include/nix/store/remote-store.hh b/src/libstore/include/nix/store/remote-store.hh
+index b357b78f94..fe74a28f55 100644
+--- a/src/libstore/include/nix/store/remote-store.hh
++++ b/src/libstore/include/nix/store/remote-store.hh
+@@ -146,7 +146,7 @@ public:
+ 
+     void addSignatures(const StorePath & storePath, const std::set<Signature> & sigs) override;
+ 
+-    MissingPaths queryMissing(const std::vector<DerivedPath> & targets) override;
++    MissingPaths queryMissing(const std::vector<DerivedPath> & targets, Store * evalStore = nullptr) override;
+ 
+     void addBuildLog(const StorePath & drvPath, std::string_view log) override;
+ 
+diff --git a/src/libstore/include/nix/store/store-api.hh b/src/libstore/include/nix/store/store-api.hh
+index 06122cc746..567abdc756 100644
+--- a/src/libstore/include/nix/store/store-api.hh
++++ b/src/libstore/include/nix/store/store-api.hh
+@@ -944,8 +944,11 @@ public:
+      * Given a set of paths that are to be built, return the set of
+      * derivations that will be built, and the set of output paths that
+      * will be substituted.
++     *
++     * @param evalStore If given, derivations not (yet) present in this
++     * store are read from there, like the builder does.
+      */
+-    virtual MissingPaths queryMissing(const std::vector<DerivedPath> & targets);
++    virtual MissingPaths queryMissing(const std::vector<DerivedPath> & targets, Store * evalStore = nullptr);
+ 
+     /**
+      * Sort a set of paths topologically under the references
+diff --git a/src/libstore/misc.cc b/src/libstore/misc.cc
+index 67822e170b..5af725a6e1 100644
+--- a/src/libstore/misc.cc
++++ b/src/libstore/misc.cc
+@@ -167,10 +167,12 @@ void Store::querySubstitutablePathInfos(const StorePathCAMap & paths, Substituta
+         std::rethrow_exception(ex);
+ }
+ 
+-MissingPaths Store::queryMissing(const std::vector<DerivedPath> & targets)
++MissingPaths Store::queryMissing(const std::vector<DerivedPath> & targets, Store * evalStore_)
+ {
+     Activity act(*logger, lvlDebug, actUnknown, "querying info about missing paths");
+ 
++    auto & evalStore = evalStore_ ? *evalStore_ : *this;
++
+     MissingPaths res;
+ 
+     auto mustBuildDrv = [&](const StorePath & drvPath, const Derivation & drv, std::set<DerivedPath> & edges) {
+@@ -202,7 +204,8 @@ MissingPaths Store::queryMissing(const std::vector<DerivedPath> & targets)
+                     }
+                     auto & drvPath = drvPathP->path;
+ 
+-                    if (!isValidPath(drvPath)) {
++                    auto * drvStore = evalStore.isValidPath(drvPath) ? &evalStore : this;
++                    if (!drvStore->isValidPath(drvPath)) {
+                         // FIXME: we could try to substitute the derivation.
+                         res.unknown.insert(drvPath);
+                         co_return;
+@@ -212,7 +215,7 @@ MissingPaths Store::queryMissing(const std::vector<DerivedPath> & targets)
+                     /* true for regular derivations, and CA derivations for which we
+                        have a trust mapping for all wanted outputs. */
+                     auto knownOutputPaths = true;
+-                    for (auto & [outputName, pathOpt] : queryPartialDerivationOutputMap(drvPath)) {
++                    for (auto & [outputName, pathOpt] : queryPartialDerivationOutputMap(drvPath, drvStore)) {
+                         if (!pathOpt) {
+                             knownOutputPaths = false;
+                             break;
+@@ -223,7 +226,7 @@ MissingPaths Store::queryMissing(const std::vector<DerivedPath> & targets)
+                     if (knownOutputPaths && invalid.empty())
+                         co_return;
+ 
+-                    auto drv = make_ref<Derivation>(derivationFromPath(drvPath));
++                    auto drv = make_ref<Derivation>(drvStore->readDerivation(drvPath));
+                     DerivationOptions<SingleDerivedPath> drvOptions;
+                     try {
+                         // FIXME: this is a lot of work just to get the value
+diff --git a/src/libstore/remote-store.cc b/src/libstore/remote-store.cc
+index d6cd21f5a7..eace516027 100644
+--- a/src/libstore/remote-store.cc
++++ b/src/libstore/remote-store.cc
+@@ -840,9 +840,9 @@ void RemoteStore::addSignatures(const StorePath & storePath, const std::set<Sign
+     readInt(conn->from);
+ }
+ 
+-MissingPaths RemoteStore::queryMissing(const std::vector<DerivedPath> & targets)
++MissingPaths RemoteStore::queryMissing(const std::vector<DerivedPath> & targets, Store * evalStore)
+ {
+-    {
++    if (!evalStore || evalStore == this) {
+         auto conn(getConnection());
+         if (conn->protoVersion.number < WorkerProto::Version::Number{1, 19})
+             // Don't hold the connection handle in the fallback case
+@@ -860,7 +860,8 @@ MissingPaths RemoteStore::queryMissing(const std::vector<DerivedPath> & targets)
+     }
+ 
+ fallback:
+-    return Store::queryMissing(targets);
++    // The daemon cannot see the eval store, so do the traversal here.
++    return Store::queryMissing(targets, evalStore);
+ }
+ 
+ void RemoteStore::addBuildLog(const StorePath & drvPath, std::string_view log)
+diff --git a/src/libstore/restricted-store.cc b/src/libstore/restricted-store.cc
+index 68d38525eb..96357c7b1a 100644
+--- a/src/libstore/restricted-store.cc
++++ b/src/libstore/restricted-store.cc
+@@ -145,7 +145,7 @@ public:
+         unsupported("addSignatures");
+     }
+ 
+-    MissingPaths queryMissing(const std::vector<DerivedPath> & targets) override;
++    MissingPaths queryMissing(const std::vector<DerivedPath> & targets, Store * evalStore = nullptr) override;
+ 
+     virtual std::optional<std::string> getBuildLogExact(const StorePath & path) override
+     {
+@@ -370,7 +370,7 @@ RestrictedBuilder::buildPathsWithResults(const std::vector<DerivedPath> & paths,
+     return results;
+ }
+ 
+-MissingPaths RestrictedStore::queryMissing(const std::vector<DerivedPath> & targets)
++MissingPaths RestrictedStore::queryMissing(const std::vector<DerivedPath> & targets, Store * evalStore)
+ {
+     /* This is slightly impure since it leaks information to the
+        client about what paths will be built/substituted or are
+@@ -385,7 +385,7 @@ MissingPaths RestrictedStore::queryMissing(const std::vector<DerivedPath> & targ
+             unknown.insert(pathPartOfReq(req));
+     }
+ 
+-    auto res = next->queryMissing(allowed);
++    auto res = next->queryMissing(allowed, evalStore);
+ 
+     for (auto & p : unknown)
+         res.unknown.insert(p);
+diff --git a/src/nix/build.cc b/src/nix/build.cc
+index 435872b603..edfb06689e 100644
+--- a/src/nix/build.cc
++++ b/src/nix/build.cc
+@@ -140,7 +140,7 @@ struct CmdBuild : InstallablesCommand, MixOutLinkByDefault, MixDryRun, MixJSON,
+                 for (auto & b : i->toDerivedPaths())
+                     pathsToBuild.push_back(b.path);
+ 
+-            printMissing(store, pathsToBuild, lvlError);
++            printMissing(store, pathsToBuild, lvlError, &*getEvalStore());
+ 
+             if (json)
+                 printJSON(derivedPathsToJSON(pathsToBuild, *store));
+diff --git a/src/nix/flake.cc b/src/nix/flake.cc
+index 96de12623a..a17217932b 100644
+--- a/src/nix/flake.cc
++++ b/src/nix/flake.cc
+@@ -814,7 +814,7 @@ struct CmdFlakeCheck : FlakeCommand, MixPrintOutPaths, MixOutLinkBase
+             // For now, we skip building derivations whose outputs are already available
+             // via substitution, as `nix flake check` only needs to verify buildability,
+             // not actually produce the outputs.
+-            auto missing = store->queryMissing(drvPaths);
++            auto missing = store->queryMissing(drvPaths, &*getEvalStore());
+ 
+             std::vector<DerivedPath> toBuild;
+             for (auto & path : missing.willBuild) {
+diff --git a/src/nix/nix-build/nix-build.cc b/src/nix/nix-build/nix-build.cc
+index 9d05e57522..9ffa337529 100644
+--- a/src/nix/nix-build/nix-build.cc
++++ b/src/nix/nix-build/nix-build.cc
+@@ -448,7 +448,7 @@ static void main_nix_build(int argc, char ** argv)
+ 
+     auto buildPaths = [&](const std::vector<DerivedPath> & paths) {
+         if (settings.printMissing)
+-            printMissing(ref<Store>(store), paths);
++            printMissing(ref<Store>(store), paths, lvlInfo, &*evalStore);
+ 
+         if (!dryRun)
+             store->getBuilder(evalStore)->buildPaths(paths, buildMode);
+diff --git a/tests/functional/eval-store.sh b/tests/functional/eval-store.sh
+index d32c905165..4a11d6a50e 100755
+--- a/tests/functional/eval-store.sh
++++ b/tests/functional/eval-store.sh
+@@ -11,6 +11,12 @@ needLocalStore "“--eval-store” doesn't achieve much with the daemon"
+ 
+ eval_store=$TEST_ROOT/eval-store
+ 
++# The build store has not seen the .drv files yet. queryMissing must read
++# them from the eval store instead of reporting them as unknown.
++out=$(nix build -f dependencies.nix --eval-store "$eval_store" --dry-run 2>&1)
++[[ $out != *"don't know how to build"* ]]
++[[ $out == *"will be built"* ]]
++
+ nix build -f dependencies.nix --eval-store "$eval_store" -o "$TEST_ROOT/result"
+ [[ -e $TEST_ROOT/result/foobar ]]
+ if [[ -z "${NIX_TESTS_CA_BY_DEFAULT:-}" ]]; then
+-- 
+2.43.0
+

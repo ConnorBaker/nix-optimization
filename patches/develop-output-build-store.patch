@@ -1,0 +1,43 @@
+From 0300cf724d8e139143967a2213445824877a26a1 Mon Sep 17 00:00:00 2001
+From: Connor Baker <ConnorBaker01@gmail.com>
+Date: Thu, 15 Oct 2026 11:13:07 -0700
+Subject: [PATCH] develop: read environment output from build store
+
+---
+ src/nix/develop.cc             | 4 ++--
+ tests/functional/eval-store.sh | 4 ++++
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/nix/develop.cc b/src/nix/develop.cc
+index 78005b2a1d..f65ae25adf 100644
+--- a/src/nix/develop.cc
++++ b/src/nix/develop.cc
+@@ -302,8 +302,8 @@ static StorePath getDerivationEnvironment(ref<Store> store, ref<Store> evalStore
+ 
+     // `get-env.sh` will write its JSON output to an arbitrary output
+     // path, so return the first non-empty output path.
+-    for (auto & [_0, path] : deepQueryDerivationOutputMap(*evalStore, shellDrvPath)) {
+-        auto accessor = evalStore->requireStoreObjectAccessor(path);
++    for (auto & [_0, path] : deepQueryDerivationOutputMap(*store, shellDrvPath, &*evalStore)) {
++        auto accessor = store->requireStoreObjectAccessor(path);
+         if (auto st = accessor->maybeLstat(CanonPath::root); st && st->fileSize.value_or(0))
+             return path;
+     }
+diff --git a/tests/functional/eval-store.sh b/tests/functional/eval-store.sh
+index d32c905165..371f42106a 100755
+--- a/tests/functional/eval-store.sh
++++ b/tests/functional/eval-store.sh
+@@ -51,6 +51,10 @@ rm -rf "$eval_store"
+ ls "$NIX_STORE_DIR"/*dependencies-top/foobar
+ (! ls "$eval_store"/nix/store/*dependencies-top/foobar)
+ 
++# `nix develop` writes its synthetic environment derivation to the
++# evaluation store, but realizes and reads its output from the build store.
++nix develop --eval-store "$eval_store" -f shell.nix shellDrv -c bash -c '[[ -n $stdenv ]]'
++
+ # Can't write .drv by default
+ (! nix-instantiate dependencies.nix --eval-store "dummy://")
+ nix-instantiate dependencies.nix --eval-store "dummy://?read-only=false"
+-- 
+2.43.0
+
