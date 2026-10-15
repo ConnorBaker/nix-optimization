@@ -265,7 +265,9 @@ lib.makeOverridable (
         ./patches/default-eval-store.patch
         ./patches/append-plugin-files.patch
         ./patches/query-missing-eval-store.patch
+        ./patches/remote-query-partial-eval-store.patch
         ./patches/develop-output-build-store.patch
+        ./patches/eval-store-command-builders.patch
         ./patches/upstream-clang-vtables.patch
         ./patches/tribuchet-external-builders.patch
         ./patches/sergei-tarball-performance.patch
