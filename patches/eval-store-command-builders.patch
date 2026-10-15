@@ -1,0 +1,220 @@
+diff --git a/src/libcmd/include/nix/cmd/repl.hh b/src/libcmd/include/nix/cmd/repl.hh
+index 5966a56..7138e2c 100644
+--- a/src/libcmd/include/nix/cmd/repl.hh
++++ b/src/libcmd/include/nix/cmd/repl.hh
+@@ -9,10 +9,12 @@ namespace nix {
+ struct AbstractNixRepl
+ {
+     ref<EvalState> state;
++    ref<Store> buildStore;
+     const Bindings * autoArgs;
+ 
+-    AbstractNixRepl(ref<EvalState> state)
++    AbstractNixRepl(ref<EvalState> state, ref<Store> buildStore)
+         : state(state)
++        , buildStore(buildStore)
+     {
+     }
+ 
+@@ -38,6 +40,7 @@ struct AbstractNixRepl
+     static std::unique_ptr<AbstractNixRepl> create(
+         const LookupPath & lookupPath,
+         ref<EvalState> state,
++        ref<Store> buildStore,
+         fun<AnnotatedValues()> getValues,
+         RunNix * runNix = nullptr);
+ 
+diff --git a/src/libcmd/repl.cc b/src/libcmd/repl.cc
+index 3daacf4..6454bf4 100644
+--- a/src/libcmd/repl.cc
++++ b/src/libcmd/repl.cc
+@@ -80,7 +80,12 @@ struct NixRepl : AbstractNixRepl, detail::ReplCompleterMixin, gc
+ 
+     std::unique_ptr<ReplInteracter> interacter;
+ 
+-    NixRepl(const LookupPath & lookupPath, ref<EvalState> state, fun<AnnotatedValues()> getValues, RunNix * runNix);
++    NixRepl(
++        const LookupPath & lookupPath,
++        ref<EvalState> state,
++        ref<Store> buildStore,
++        fun<AnnotatedValues()> getValues,
++        RunNix * runNix);
+     virtual ~NixRepl() = default;
+ 
+     ReplExitStatus mainLoop() override;
+@@ -132,8 +137,12 @@ std::string removeWhitespace(std::string s)
+ }
+ 
+ NixRepl::NixRepl(
+-    const LookupPath & lookupPath, ref<EvalState> state, fun<NixRepl::AnnotatedValues()> getValues, RunNix * runNix)
+-    : AbstractNixRepl(state)
++    const LookupPath & lookupPath,
++    ref<EvalState> state,
++    ref<Store> buildStore,
++    fun<NixRepl::AnnotatedValues()> getValues,
++    RunNix * runNix)
++    : AbstractNixRepl(state, buildStore)
+     , debugTraceIndex(0)
+     , getValues(getValues)
+     , staticEnv(new StaticEnv(nullptr, state->staticBaseEnv))
+@@ -547,31 +556,32 @@ ProcessLineResult NixRepl::processLine(std::string line)
+         std::string drvPathRaw = state->store->printStorePath(drvPath);
+ 
+         if (command == ":b" || command == ":bl") {
+-            state->store->getBuilder()->buildPaths({
++            buildStore->getBuilder(state->store)->buildPaths({
+                 DerivedPath::Built{
+                     .drvPath = makeConstantStorePathRef(drvPath),
+                     .outputs = OutputsSpec::All{},
+                 },
+             });
+-            auto drv = state->store->readDerivation(drvPath);
+             logger->cout("\nThis derivation produced the following outputs:");
+-            for (auto & [outputName, outputPath] : deepQueryDerivationOutputMap(*state->store, drvPath)) {
+-                auto localStore = state->store.dynamic_pointer_cast<LocalFSStore>();
++            for (auto & [outputName, outputPath] :
++                 deepQueryDerivationOutputMap(*buildStore, drvPath, &*state->store)) {
++                auto localStore = buildStore.dynamic_pointer_cast<LocalFSStore>();
+                 if (localStore && command == ":bl") {
+                     std::string symlink = "repl-result-" + outputName;
+                     localStore->addPermRoot(outputPath, absPath(symlink));
+-                    logger->cout("  ./%s -> %s", symlink, state->store->printStorePath(outputPath));
++                    logger->cout("  ./%s -> %s", symlink, buildStore->printStorePath(outputPath));
+                 } else {
+-                    logger->cout("  %s -> %s", outputName, state->store->printStorePath(outputPath));
++                    logger->cout("  %s -> %s", outputName, buildStore->printStorePath(outputPath));
+                 }
+             }
+         } else if (command == ":i") {
++            copyClosure(*state->store, *buildStore, RealisedPath::Set{drvPath});
+             runNix("nix-env", toOsStrings({"-i", drvPathRaw}));
+         } else if (command == ":log") {
+             settings.readOnlyMode = true;
+             Finally roModeReset([&]() { settings.readOnlyMode = false; });
+             RunPager pager;
+-            auto log = fetchBuildLog(state->store, drvPath, drvPathRaw);
++            auto log = fetchBuildLog(buildStore, drvPath, drvPathRaw);
+             logger->writeToStdout(log);
+         } else {
+             runNix("nix-shell", toOsStrings({drvPathRaw}));
+@@ -959,9 +969,13 @@ void NixRepl::runNix(const std::string & program, OsStrings args)
+ }
+ 
+ std::unique_ptr<AbstractNixRepl> AbstractNixRepl::create(
+-    const LookupPath & lookupPath, ref<EvalState> state, fun<AnnotatedValues()> getValues, RunNix * runNix)
++    const LookupPath & lookupPath,
++    ref<EvalState> state,
++    ref<Store> buildStore,
++    fun<AnnotatedValues()> getValues,
++    RunNix * runNix)
+ {
+-    return std::make_unique<NixRepl>(lookupPath, state, getValues, runNix);
++    return std::make_unique<NixRepl>(lookupPath, state, buildStore, getValues, runNix);
+ }
+ 
+ ReplExitStatus AbstractNixRepl::runSimple(ref<EvalState> evalState, const ValMap & extraEnv)
+@@ -975,6 +989,7 @@ ReplExitStatus AbstractNixRepl::runSimple(ref<EvalState> evalState, const ValMap
+     auto repl = std::make_unique<NixRepl>(
+         lookupPath,
+         evalState,
++        evalState->store,
+         getValues,
+         /*runNix=*/nullptr);
+ 
+diff --git a/src/nix/bundle.cc b/src/nix/bundle.cc
+index 65dfdb2..631a0d2 100644
+--- a/src/nix/bundle.cc
++++ b/src/nix/bundle.cc
+@@ -112,7 +112,7 @@ struct CmdBundle : InstallableValueCommand
+ 
+         auto outPath = evalState->coerceToStorePath(attr2->pos, *attr2->value, context2, "");
+ 
+-        store->getBuilder()->buildPaths({
++        store->getBuilder(getEvalStore())->buildPaths({
+             DerivedPath::Built{
+                 .drvPath = makeConstantStorePathRef(drvPath),
+                 .outputs = OutputsSpec::All{},
+diff --git a/src/nix/flake.cc b/src/nix/flake.cc
+index 64f82f8..eb861f3 100644
+--- a/src/nix/flake.cc
++++ b/src/nix/flake.cc
+@@ -828,7 +828,8 @@ struct CmdFlakeCheck : FlakeCommand, MixPrintOutPaths, MixOutLinkBase
+ 
+             Activity act(*logger, lvlInfo, actUnknown, fmt("running %d flake checks", toBuild.size()));
+             // once we get rid of the temporary hack above, this tenary operator will also go away
+-            results = store->getBuilder()->buildPathsWithResults((printOutputPaths || outLink) ? drvPaths : toBuild);
++            results = store->getBuilder(getEvalStore())
++                          ->buildPathsWithResults((printOutputPaths || outLink) ? drvPaths : toBuild);
+ 
+             // Report build failures with attribute paths
+             for (auto & result : results) {
+diff --git a/src/nix/repl.cc b/src/nix/repl.cc
+index b5a4aa8..868ea99 100644
+--- a/src/nix/repl.cc
++++ b/src/nix/repl.cc
+@@ -80,7 +80,7 @@ struct CmdRepl : RawInstallablesCommand
+             }
+             return values;
+         };
+-        auto repl = AbstractNixRepl::create(lookupPath, state, getValues, runNix);
++        auto repl = AbstractNixRepl::create(lookupPath, state, store, getValues, runNix);
+         repl->autoArgs = getAutoArgs(*repl->state);
+         repl->initEnv();
+         repl->mainLoop();
+diff --git a/tests/functional/eval-store.sh b/tests/functional/eval-store.sh
+index 9e93f4d..ce7728e 100755
+--- a/tests/functional/eval-store.sh
++++ b/tests/functional/eval-store.sh
+@@ -29,6 +29,25 @@ remote_out=$(
+         --no-link --print-out-paths
+ )
+ [[ -e "$remote_root$remote_out/foobar" ]]
++
++# Flake checks must pass the evaluation store to the remote builder after the
++# client-side missing-path traversal has selected the checks to build.
++flake_dir=$TEST_ROOT/eval-store-flake
++mkdir -p "$flake_dir"
++shell=$(nix eval --raw -f ./config.nix shell)
++cat > "$flake_dir/flake.nix" <<EOF
++{
++  outputs = { ... }: {
++    checks.$system.default = derivation {
++      name = "eval-store-flake-check";
++      system = "$system";
++      builder = "$shell";
++      args = [ "-c" "printf checked > \$out" ];
++    };
++  };
++}
++EOF
++nix flake check --eval-store "$eval_store" --store "$remote_store" "path:$flake_dir"
+ rm -rf "$remote_root"
+ 
+ nix build -f dependencies.nix --eval-store "$eval_store" -o "$TEST_ROOT/result"
+diff --git a/tests/functional/flakes/bundle.sh b/tests/functional/flakes/bundle.sh
+index 0689d94..9b80853 100755
+--- a/tests/functional/flakes/bundle.sh
++++ b/tests/functional/flakes/bundle.sh
+@@ -42,5 +42,9 @@ mkDerivation {
+   buildCommand = "echo hi > $out";
+ }
+ EOF
+-nix bundle --bundler .#bundlers."$system".simple -f function.nix -o function-bundle
++nix bundle \
++    --eval-store "$TEST_ROOT/bundle-eval-store" \
++    --bundler .#bundlers."$system".simple \
++    -f function.nix \
++    -o function-bundle
+ [[ $(cat function-bundle) = hi ]]
+diff --git a/tests/functional/repl.sh b/tests/functional/repl.sh
+index cabb820..e49624f 100755
+--- a/tests/functional/repl.sh
++++ b/tests/functional/repl.sh
+@@ -71,3 +71,7 @@ testRepl () {
+ testRepl
+ # Same thing (kind-of), but with a remote store.
+ testRepl --store "$TEST_ROOT/other-root?real=$NIX_STORE_DIR"
++# Evaluation and build stores may also be distinct.
++testRepl \
++    --eval-store "$TEST_ROOT/repl-eval-store" \
++    --store "$TEST_ROOT/repl-build-store?real=$NIX_STORE_DIR"

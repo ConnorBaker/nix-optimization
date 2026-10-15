@@ -66,8 +66,48 @@ pkgs.runCommand "tarmac-build-test" {
 ''
 NIX
 task_output=$("$task_nix" build --no-link --print-out-paths --builders '' \
-  -f "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp")
+  -f "$task_tmp/build.nix" --argstr nixpkgs "$task_nixpkgs" --argstr nonce "$task_tmp" \
+  2>"$task_tmp/build.log")
+grep -q 'will be built' "$task_tmp/build.log"
 test "$(cat "$task_output")" = "build works $task_tmp"
+
+# Commands that build outside Installable::build must forward the evaluation
+# store to their builders as well.
+task_system=$("$task_nix" eval --impure --raw --expr builtins.currentSystem)
+task_flake=$task_tmp/flake
+mkdir -p "$task_flake"
+cat >"$task_flake/flake.nix" <<NIX
+{
+  inputs.nixpkgs.url = "path:$task_nixpkgs";
+  outputs = { nixpkgs, ... }: let
+    pkgs = nixpkgs.legacyPackages."$task_system";
+  in {
+    checks."$task_system".default = pkgs.runCommand "tarmac-flake-check" {
+      nonce = "$task_tmp-flake-check";
+    } "printf checked > \$out";
+    packages."$task_system".default = pkgs.runCommand "tarmac-bundle" {
+      nonce = "$task_tmp-bundle";
+    } "printf bundled > \$out";
+    bundlers."$task_system".default = drv: drv;
+  };
+}
+NIX
+"$task_nix" flake check --no-write-lock-file --builders '' "path:$task_flake"
+"$task_nix" bundle --no-write-lock-file --bundler "path:$task_flake#bundlers.$task_system.default" \
+  "path:$task_flake#packages.$task_system.default" -o "$task_tmp/bundle"
+test "$(cat "$task_tmp/bundle")" = bundled
+
+cat >"$task_tmp/repl.nix" <<NIX
+let
+  pkgs = import (builtins.toPath "$task_nixpkgs") { };
+in {
+  replBuild = pkgs.runCommand "tarmac-repl" {
+    nonce = "$task_tmp-repl";
+  } "printf repl > \$out";
+}
+NIX
+"$task_nix" repl --file "$task_tmp/repl.nix" <<<':b replBuild' >"$task_tmp/repl.log"
+grep -q 'This derivation produced the following outputs' "$task_tmp/repl.log"
 
 # `nix develop` writes its synthetic environment derivation to the eval store,
 # then realizes and reads the output from the ordinary build store.
@@ -102,4 +142,4 @@ if "$(dirname "$task_nix")/nix-store" --check-validity "$task_cached_drv" 2>/dev
 fi
 task_cached_output=$("$task_nix" build "$task_cached_drv^*" --no-link --print-out-paths --builders '')
 test "$(cat "$task_cached_output")" = "build works $task_tmp-cached"
-printf 'Tarmac default evaluation, persistence, concurrent writers, explicit override, legacy evaluation, development environments, and modern and legacy builds passed.\n'
+printf 'Tarmac evaluation, persistence, concurrent writers, explicit override, flake checks, bundles, the REPL, development environments, and modern and legacy builds passed.\n'

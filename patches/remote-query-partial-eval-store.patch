@@ -1,0 +1,52 @@
+diff --git a/src/libstore/remote-store.cc b/src/libstore/remote-store.cc
+index bb603c1..65bf261 100644
+--- a/src/libstore/remote-store.cc
++++ b/src/libstore/remote-store.cc
+@@ -305,13 +305,15 @@ RemoteStore::queryPartialDerivationOutputMap(const StorePath & path, Store * eva
+         } else {
+             auto & evalStore = *evalStore_;
+             auto outputs = evalStore.queryStaticPartialDerivationOutputMap(path);
+-            // union with the first branch overriding the statically-known ones
+-            // when non-`std::nullopt`.
+-            for (auto && [outputName, optPath] : queryPartialDerivationOutputMap(path, nullptr)) {
+-                if (optPath)
+-                    outputs.insert_or_assign(std::move(outputName), std::move(optPath));
+-                else
+-                    outputs.insert({std::move(outputName), std::nullopt});
++            if (isValidPath(path)) {
++                // Union with the first branch overriding the statically-known ones
++                // when non-`std::nullopt`.
++                for (auto && [outputName, optPath] : queryPartialDerivationOutputMap(path, nullptr)) {
++                    if (optPath)
++                        outputs.insert_or_assign(std::move(outputName), std::move(optPath));
++                    else
++                        outputs.insert({std::move(outputName), std::nullopt});
++                }
+             }
+             return outputs;
+         }
+diff --git a/tests/functional/eval-store.sh b/tests/functional/eval-store.sh
+index 4a11d6a..315c26b 100755
+--- a/tests/functional/eval-store.sh
++++ b/tests/functional/eval-store.sh
+@@ -17,6 +17,20 @@ out=$(nix build -f dependencies.nix --eval-store "$eval_store" --dry-run 2>&1)
+ [[ $out != *"don't know how to build"* ]]
+ [[ $out == *"will be built"* ]]
+ 
++# RemoteStore must not query the build store for a derivation that only exists
++# in the evaluation store. The builder copies it after the missing-path query.
++remote_root=$TEST_ROOT/remote-build-store
++remote_store="ssh-ng://localhost?remote-store=$remote_root"
++out=$(nix build -f dependencies.nix --eval-store "$eval_store" --store "$remote_store" --dry-run 2>&1)
++[[ $out != *"don't know how to build"* ]]
++[[ $out == *"will be built"* ]]
++remote_out=$(
++    nix build -f dependencies.nix --eval-store "$eval_store" --store "$remote_store" \
++        --no-link --print-out-paths
++)
++[[ -e "$remote_root$remote_out/foobar" ]]
++rm -rf "$remote_root"
++
+ nix build -f dependencies.nix --eval-store "$eval_store" -o "$TEST_ROOT/result"
+ [[ -e $TEST_ROOT/result/foobar ]]
+ if [[ -z "${NIX_TESTS_CA_BY_DEFAULT:-}" ]]; then
