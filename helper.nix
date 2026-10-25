@@ -193,6 +193,12 @@ lib.makeOverridable (
 
       preFixup =
         prevAttrs.preFixup or ""
+        # postInstall fills it only with remarks it finds; a component that
+        # compiles nothing, or installs without hooks (the functional tests),
+        # still has to produce the output.
+        + ''
+          mkdir -p "$remarks"
+        ''
         + lib.optionalString enableBOLTProfiling ''
           instrumentWithBolt() {
             local -r elfPath="$1"
