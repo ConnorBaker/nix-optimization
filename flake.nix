@@ -1,7 +1,9 @@
 {
   inputs = {
     nix = {
-      url = "github:NixOS/nix";
+      # Upstream master plus our changes and the PRs we carry; see its
+      # merge history.
+      url = "github:ConnorBaker/nix/integration";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
@@ -192,11 +194,10 @@
             {
               gcc =
                 (
-                  (inputs.nix.lib.makeComponents {
+                  inputs.nix.lib.makeComponents {
                     inherit pkgs;
                     getStdenv = builtins.getAttr "stdenv";
-                  }).appendPatches
-                    [ ./patches/upstream-clang-vtables.patch ]
+                  }
                 ).overrideScope
                   (
                     final: _: {
@@ -218,11 +219,10 @@
 
               clang =
                 (
-                  (inputs.nix.lib.makeComponents {
+                  inputs.nix.lib.makeComponents {
                     inherit pkgs;
                     getStdenv = builtins.getAttr "clangStdenv";
-                  }).appendPatches
-                    [ ./patches/upstream-clang-vtables.patch ]
+                  }
                 ).overrideScope
                   (
                     final: _: {
