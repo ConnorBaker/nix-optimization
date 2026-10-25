@@ -259,22 +259,11 @@ lib.makeOverridable (
         getStdenv = pkgs: pkgs.llvmPackages_22.stdenv;
       };
     in
-    # Patch every optimized and profiling component from the same source tree.
-    components.appendPatches (
-      [
-        ./patches/default-eval-store.patch
-        ./patches/append-plugin-files.patch
-        ./patches/query-missing-eval-store.patch
-        ./patches/remote-query-partial-eval-store.patch
-        ./patches/develop-output-build-store.patch
-        ./patches/eval-store-command-builders.patch
-        ./patches/eval-store-read-commands.patch
-        ./patches/upstream-clang-vtables.patch
-        ./patches/tribuchet-external-builders.patch
-        ./patches/sergei-tarball-performance.patch
-      ]
-      ++ patches
-    )
+    # Our Nix changes are in the source itself (the `nix` input is
+    # ConnorBaker/nix's integration branch); consumers may add `patches`,
+    # applied to every optimized and profiling component alike. Upstream's
+    # `appendPatches [ ]` fails: its string source has no `name`.
+    (if patches == [ ] then components else components.appendPatches patches)
   ).overrideScope
     (
       final: prev:
@@ -283,8 +272,8 @@ lib.makeOverridable (
       }
       // {
         # Shared by profiling/final Nix and every component/plugin consumer.
-        # PR #16427 requires the native zlib-ng and pack-config changes as
-        # well as its Nix source patch; changing only git-utils is insufficient.
+        # PR #16427's tarball-cache change needs libgit2 >= 2.0; with an
+        # older libgit2 it compiles to nothing.
         libgit2 = pkgs.callPackage ./packages/libgit2-tarball-cache.nix {
           stdenv = pkgs.llvmPackages_22.stdenv;
         };
