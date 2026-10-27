@@ -8,6 +8,10 @@ let
   plugin =
     (pkgs.callPackage (nix-tarmac + "/package.nix") {
       inherit (components) nix-fetchers nix-store nix-util;
+      # Use the components' compiler: Clang and GCC mangle constrained
+      # templates such as nix::string2Int<std::integral N> differently, so a
+      # GCC-built plugin fails to load against Clang-built libraries.
+      stdenv = pkgs.llvmPackages_22.stdenv;
       doCheck = true;
     }).overrideAttrs
       {
