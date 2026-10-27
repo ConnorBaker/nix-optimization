@@ -231,6 +231,24 @@ lib.makeOverridable (
           }
 
           postFixupHooks+=("autoFixElfFiles optimizeWithBolt")
+        ''
+        # -fsave-optimization-record makes Clang emit line tables (the driver adds -debug-info-kind=line-tables-only),
+        # and dontStrip keeps them. They name every header used, so each library referenced the -dev outputs, GCC's
+        # C++ headers and Boost's, about 1.9 GiB of a system closure. Remove the debug sections last, after BOLT, which
+        # needs the relocations the usual strip would drop. The symbol table stays and the remarks keep their source
+        # locations. Profiling builds are left as they are, so their profiles stay valid.
+        + lib.optionalString (!enableProfiling) ''
+          stripDebugSections() {
+            local output file
+            for output in $(getAllOutputNames); do
+              while IFS= read -r -d "" file; do
+                isELF "$file" || continue
+                $STRIP --strip-debug "$file"
+              done < <(find "''${!output}" -type f -print0)
+            done
+          }
+
+          postFixupHooks+=(stripDebugSections)
         '';
     };
   in

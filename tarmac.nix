@@ -5,10 +5,17 @@
 }:
 let
   nix = components.nix-cli;
-  plugin = pkgs.callPackage (nix-tarmac + "/package.nix") {
-    inherit (components) nix-fetchers nix-store nix-util;
-    doCheck = true;
-  };
+  plugin =
+    (pkgs.callPackage (nix-tarmac + "/package.nix") {
+      inherit (components) nix-fetchers nix-store nix-util;
+      doCheck = true;
+    }).overrideAttrs
+      {
+        # Upstream builds with -g and keeps the debug info (dontStrip), whose
+        # paths kept the Nix components' -dev outputs, GCC's C++ headers and
+        # Boost's in the closure. Strip it as Nixpkgs does; symbols stay.
+        dontStrip = false;
+      };
 in
 pkgs.symlinkJoin {
   name = "${nix.name}-with-tarmac";
