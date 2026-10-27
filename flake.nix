@@ -183,6 +183,16 @@
               tarmac-cs-pgo-bolt = mkTarmacNix config.legacyPackages.cs-pgo-bolt;
             };
 
+          # tests/tarmac.sh in a VM, for the variants the overlay and README use.
+          checks = lib.genAttrs [ "tarmac-baseline" "tarmac-pgo" ] (
+            name:
+            import ./tests/tarmac-vm.nix {
+              inherit pkgs;
+              inherit (inputs) nixpkgs;
+              nix = config.packages.${name};
+            }
+          );
+
           legacyPackages =
             let
               helper = import ./helper.nix {
@@ -191,12 +201,10 @@
             in
             {
               gcc =
-                (
-                  inputs.nix.lib.makeComponents {
-                    inherit pkgs;
-                    getStdenv = builtins.getAttr "stdenv";
-                  }
-                ).overrideScope
+                (inputs.nix.lib.makeComponents {
+                  inherit pkgs;
+                  getStdenv = builtins.getAttr "stdenv";
+                }).overrideScope
                   (
                     final: _: {
                       # Preserve upstream Nix's GC tuning and use Clang for the collector.
@@ -216,12 +224,10 @@
                   );
 
               clang =
-                (
-                  inputs.nix.lib.makeComponents {
-                    inherit pkgs;
-                    getStdenv = builtins.getAttr "clangStdenv";
-                  }
-                ).overrideScope
+                (inputs.nix.lib.makeComponents {
+                  inherit pkgs;
+                  getStdenv = builtins.getAttr "clangStdenv";
+                }).overrideScope
                   (
                     final: _: {
                       # Preserve upstream Nix's GC tuning and use Clang for the collector.
