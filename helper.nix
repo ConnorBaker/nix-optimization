@@ -366,6 +366,8 @@ lib.makeOverridable (
               # NOTE: With PGO/CSPGO, `-fprofile-update=atomic` (see cflags) keeps the counters correct across eval
               # threads, at the cost of contention (the instrumented evaluation is much slower than a normal one).
               # NOTE: GC_DONT_GC=1 matches our workload, but means the collector's marking code is not trained.
+              # NOTE: Uses as many evaluation threads as the builder allows (`NIX_BUILD_CORES`, i.e. the `cores` setting;
+              # `--eval-cores 0` means all cores), so the profile depends on the builder (see the README).
               parallel =
                 let
                   walker = pkgs.writeText "walk-nixpkgs.nix" ''
@@ -422,7 +424,7 @@ lib.makeOverridable (
                         --no-fsync-metadata \
                         --lazy-trees \
                         --extra-experimental-features 'ca-derivations parallel-eval' \
-                        --eval-cores 16 \
+                        --eval-cores "$NIX_BUILD_CORES" \
                         ${
                           lib.optionalString (
                             extraProfileEvalArgs != [ ]
