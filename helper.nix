@@ -117,6 +117,13 @@ lib.makeOverridable (
     ++ lib.optionals enableCSPGOProfiling [
       "-fcs-profile-generate"
     ]
+    # BOLT's instrumentation runtime writes the profile from the binary's fini hook. Since 3.23.3, Nix exits with
+    # std::_Exit() (skipping fini and atexit handlers) except when __LLVM_INSTR_PROFILE_GENERATE is defined, which
+    # Clang does for PGO/CSPGO but not here, since BOLT instruments after linking. This changes only quickExit(), so
+    # the profile still matches the optimized binary.
+    ++ lib.optionals enableBOLTProfiling [
+      "-D__LLVM_INSTR_PROFILE_GENERATE"
+    ]
     # https://clang.llvm.org/docs/UsersManual.html#cmdoption-ftemporal-profile
     ++ lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [
       "-fprofile-update=atomic"
