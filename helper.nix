@@ -312,8 +312,12 @@ lib.makeOverridable (
 
         # TODO Hack until https://github.com/NixOS/nixpkgs/issues/45462 is fixed.
         # Copied from DetSys Nix's packaging/dependencies.nix
+        # Boost 1.89, as upstream Nix uses: Boost 1.91's Boost.URL stores an IPv6 literal's encoded size as its decoded
+        # size, so a host with a pct-encoded zone ID (e.g. `[fe80::1%25eth0]`) decodes with trailing NULs, failing Nix's
+        # URL unit tests. Fixed in https://github.com/boostorg/url/commit/4dca58d (boostorg/url#1004); use `pkgs.boost`
+        # again once a Boost release has it.
         boost =
-          (pkgs.boost.override {
+          (pkgs.boost189.override {
             extraB2Args = [
               "--with-container"
               "--with-context"
