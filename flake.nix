@@ -52,6 +52,10 @@
             );
         in
         lib.fix (self: {
+          # Built like the others (Clang, `patches`, `enableGC`), but without profiles: quick to build, e.g. for a system
+          # whose profiling pipeline isn't worth running.
+          baseline = helper { };
+
           bolt-profiling = helper {
             enableBOLTProfiling = true;
           };
