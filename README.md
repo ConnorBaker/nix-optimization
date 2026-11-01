@@ -3,13 +3,13 @@
 Messing around with Clang's PGO/CSPGO/BOLT to optimize Nix for system closure evaluation.
 
 > [!WARNING]
-> Profiles from parallel evaluation are not reproducible, so build each variant's pipeline on a single machine.
+> Profiles from parallel evaluation aren't reproducible, so by default, build each variant's pipeline on one machine, or make the profile derivations content-addressed (`contentAddressedProfiles = true`, which needs the `ca-derivations` experimental feature wherever the variants are evaluated and built, and builders that can build floating content-addressed derivations):
 >
 > PGO/CSPGO/BOLT profiles are generated (at least, here) through instruction-level instrumentation, so they don't depend on the host architecture or on sampling. A single-threaded workload (like `closures.gnome`, with `--eval-cores 1`) should therefore give the same counts on every run, though that hasn't been checked.
 >
 > A multi-threaded workload (like `nixpkgs.parallel`, which evaluates with as many threads as the builder allows, `NIX_BUILD_CORES`) doesn't, and its profile also depends on how many threads it ran with. Thread scheduling decides how often threads collide and retry in concurrent data structures, spin on locks, steal work, and hit or miss caches. It also decides the order in which attributes are constructed, and so how many comparisons sorting them takes. Two runs of the `nixpkgs.parallel` PGO training on Determinate Nix 3.23.1 (with 16 threads) profiled the same 25,134 functions with the same CFG hashes. 490 of those functions had different counts (e.g., `SymbolTable::create`, `CanonPath::operator<=>`, boost's `rw_spinlock::yield`), the edge profile overlap was 99.918%, and the total counts were 39,898,936,511 and 39,876,764,964.
 >
-> The differences are probably too small to change optimization decisions, but they're enough to break the build. The profile derivations are input-addressed, so two machines that each built one hold different contents at the same store path, and Nix assumes they're interchangeable. When a distributed build compiles some components against one copy and some against the other, linking them together with LTO fails:
+> The differences are probably too small to change optimization decisions, but they're enough to break the build. The profile derivations are input-addressed (by default), so two machines that each built one hold different contents at the same store path, and Nix assumes they're interchangeable. When a distributed build compiles some components against one copy and some against the other, linking them together with LTO fails:
 >
 > ```
 > ld.lld: error: linking module flags 'ProfileSummary': IDs have conflicting values
@@ -17,7 +17,7 @@ Messing around with Clang's PGO/CSPGO/BOLT to optimize Nix for system closure ev
 >
 > BOLT's `.fdata` from a parallel workload presumably varies the same way (unverified). There, a mismatch between the binary that was profiled and the binary being optimized doesn't fail the build: BOLT drops the functions whose profile doesn't match, so the result is just less optimized.
 >
-> To avoid this, build all of a variant's profiling stages and the final build on one machine (e.g., `--builders ''`), or make sure no other builder already has an earlier build of the profile derivations.
+> Content-addressed, a profile's store path depends on its contents, so different runs' profiles have different paths, and so do the components built against them: they can't be mixed, wherever they're built. Otherwise, build all of a variant's profiling stages and the final build on one machine (e.g., `--builders ''`), or make sure no other builder already has an earlier build of the profile derivations.
 
 The top-level variants are trained on single-core evaluation of `nixos/release.nix closures.gnome`. The same variants trained instead on a read-only parallel (`--eval-cores "$NIX_BUILD_CORES"`) evaluation of every derivation path in Nixpkgs (with CUDA enabled) are under `nixpkgs-parallel-eval`, e.g. `.#nixpkgs-parallel-eval.cs-pgo-bolt.nix-cli` (see `profileWorkloads` in `helper.nix`).
 

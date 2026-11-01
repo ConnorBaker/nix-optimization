@@ -30,6 +30,7 @@
           patches ? [ ],
           extraProfileEvalArgs ? [ ],
           enableGC ? true,
+          contentAddressedProfiles ? false,
         }:
         let
           helper' = import ./helper.nix {
@@ -44,6 +45,7 @@
                   patches
                   extraProfileEvalArgs
                   enableGC
+                  contentAddressedProfiles
                   ;
               }
               // args

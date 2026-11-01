@@ -79,6 +79,11 @@ lib.makeOverridable (
     # which is fine for short-lived evaluations (e.g., ones that would run with GC_DONT_GC=1 anyway), and the whole heap
     # is then in mimalloc's arenas (which can be backed by huge pages).
     enableGC ? true,
+
+    # Whether the profile derivations are content-addressed (see `contentAddressed` below). Needs the `ca-derivations`
+    # experimental feature wherever the variants are evaluated and built, and builders that can build floating
+    # content-addressed derivations.
+    contentAddressedProfiles ? false,
   }:
   let
     suffix =
@@ -93,6 +98,19 @@ lib.makeOverridable (
       lib.optionalString (suffix' != "") "-${suffix'}";
 
     enableProfiling = enablePGOProfiling || enableCSPGOProfiling || enableBOLTProfiling;
+
+    # With contentAddressedProfiles, profiles are content-addressed: their output path depends on what they contain, not
+    # on how they were made. They aren't reproducible (e.g. a parallel evaluation's counts differ from run to run; see
+    # the README), so an input-addressed profile can have different contents on different machines under the same path,
+    # each from its own build. Components built against it on different machines (e.g. by a remote builder that spreads
+    # builds across machines) then use different profiles: CSPGO fails to link ("linking module flags 'ProfileSummary':
+    # IDs have conflicting values"), and BOLT is silently less effective. Content-addressed, a profile's consumers'
+    # paths depend on which profile they used, so they can't be mixed.
+    contentAddressed = lib.optionalAttrs contentAddressedProfiles {
+      __contentAddressed = true;
+      outputHashMode = "recursive";
+      outputHashAlgo = "sha256";
+    };
 
     cflags = [
       # "-march=raptorlake"
@@ -355,13 +373,16 @@ lib.makeOverridable (
               # TODO: Parallel evaluation, evaluate things other than system closurse, test with different memory/store setups.
               gnome =
                 pkgs.runCommandLocal "profiles-eval-closures-nix${suffix}"
-                  {
-                    nativeBuildInputs = [
-                      final.nix-cli
-                      pkgs.writableTmpDirAsHomeHook
-                    ];
-                    meta.broken = !enableProfiling;
-                  }
+                  (
+                    contentAddressed
+                    // {
+                      nativeBuildInputs = [
+                        final.nix-cli
+                        pkgs.writableTmpDirAsHomeHook
+                      ];
+                      meta.broken = !enableProfiling;
+                    }
+                  )
                   (
                     ''
                       nixLog "generating profile data by evaluating NixOS system closures with nix${suffix}"
@@ -431,13 +452,16 @@ lib.makeOverridable (
                   '';
                 in
                 pkgs.runCommandLocal "profiles-eval-nixpkgs-parallel-nix${suffix}"
-                  {
-                    nativeBuildInputs = [
-                      final.nix-cli
-                      pkgs.writableTmpDirAsHomeHook
-                    ];
-                    meta.broken = !enableProfiling;
-                  }
+                  (
+                    contentAddressed
+                    // {
+                      nativeBuildInputs = [
+                        final.nix-cli
+                        pkgs.writableTmpDirAsHomeHook
+                      ];
+                      meta.broken = !enableProfiling;
+                    }
+                  )
                   (
                     ''
                       nixLog "generating profile data by evaluating Nixpkgs in parallel with nix${suffix}"
@@ -485,20 +509,23 @@ lib.makeOverridable (
 
           merged =
             pkgs.runCommandLocal "profiles-merged-nix${suffix}"
-              {
-                __structuredAttrs = true;
+              (
+                contentAddressed
+                // {
+                  __structuredAttrs = true;
 
-                nativeBuildInputs =
-                  lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [ pkgs.llvmPackages_22.libllvm ]
-                  ++ lib.optionals enableBOLTProfiling [ pkgs.llvmPackages_22.bolt ];
+                  nativeBuildInputs =
+                    lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [ pkgs.llvmPackages_22.libllvm ]
+                    ++ lib.optionals enableBOLTProfiling [ pkgs.llvmPackages_22.bolt ];
 
-                profiles =
-                  lib.optionals enableProfiling final.profiles.selected
-                  # cs-pgo requires the original pgo profile as well.
-                  ++ lib.optionals enableCSPGOProfiling withPGOProfiling.profiles.selected;
+                  profiles =
+                    lib.optionals enableProfiling final.profiles.selected
+                    # cs-pgo requires the original pgo profile as well.
+                    ++ lib.optionals enableCSPGOProfiling withPGOProfiling.profiles.selected;
 
-                meta.broken = !enableProfiling;
-              }
+                  meta.broken = !enableProfiling;
+                }
+              )
               (
                 ''
                   nixLog "merging profiles"
