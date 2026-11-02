@@ -99,6 +99,13 @@ lib.makeOverridable (
 
     enableProfiling = enablePGOProfiling || enableCSPGOProfiling || enableBOLTProfiling;
 
+    # LLVM 22's BOLT instrumentation clobbers x16 on AArch64 in its indirect call handler, which a TLS descriptor call
+    # may keep a value in (https://github.com/llvm/llvm-project/issues/165664), so an instrumented Nix segfaults. It is
+    # fixed in LLVM 23 (https://github.com/llvm/llvm-project/pull/180229). x86_64 keeps LLVM 22's, so its builds
+    # don't change.
+    bolt =
+      if pkgs.stdenv.hostPlatform.isAarch64 then pkgs.llvmPackages_23.bolt else pkgs.llvmPackages_22.bolt;
+
     # With contentAddressedProfiles, profiles are content-addressed: their output path depends on what they contain, not
     # on how they were made. They aren't reproducible (e.g. a parallel evaluation's counts differ from run to run; see
     # the README), so an input-addressed profile can have different contents on different machines under the same path,
@@ -203,7 +210,7 @@ lib.makeOverridable (
         ++ [ (lib.hiPrio pkgs.llvmPackages_22.bintools) ]
         ++ lib.optionals (enableBOLTProfiling || enableBOLT) [
           pkgs.autoFixElfFiles
-          (lib.hiPrio pkgs.llvmPackages_22.bolt)
+          (lib.hiPrio bolt)
         ];
 
       postInstall = prevAttrs.postInstall or "" + ''
@@ -516,7 +523,7 @@ lib.makeOverridable (
 
                   nativeBuildInputs =
                     lib.optionals (enablePGOProfiling || enableCSPGOProfiling) [ pkgs.llvmPackages_22.libllvm ]
-                    ++ lib.optionals enableBOLTProfiling [ pkgs.llvmPackages_22.bolt ];
+                    ++ lib.optionals enableBOLTProfiling [ bolt ];
 
                   profiles =
                     lib.optionals enableProfiling final.profiles.selected
