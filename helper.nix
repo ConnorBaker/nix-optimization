@@ -22,9 +22,13 @@ lib.makeOverridable (
 
       icf = "all";
 
-      icp-eliminate-loads = true;
+      # With LLVM 23.1.0's BOLT, indirect call promotion miscompiles on AArch64: in libnixutil.so, a promoted call to
+      # nix::base16::decode was passed a pointer into .text as its return slot, so every test executable segfaulted in a
+      # static initializer. (Found by optimizing libnixutil.so with each option left out in turn: only leaving out
+      # this one fixed it.)
+      icp-eliminate-loads = pkgs.stdenv.hostPlatform.isx86_64;
 
-      indirect-call-promotion = "all";
+      indirect-call-promotion = if pkgs.stdenv.hostPlatform.isx86_64 then "all" else "none";
 
       jump-tables = "aggressive";
 
