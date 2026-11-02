@@ -47,6 +47,10 @@ lib.makeOverridable (
       # split-eh = true;
       split-functions = true;
       split-strategy = "cdsplit";
+      # On AArch64, BOLT's LongJmp pass (which adds stubs for branches whose target is out of range) doesn't support
+      # CDSplit ("BOLT-ERROR: CDSplit is not supported with LongJmp"); the compact code model assumes, as is the case for
+      # Nix's and Boost's libraries, that all code is within branch range (128 MiB), so LongJmp isn't needed.
+      compact-code-model = pkgs.stdenv.hostPlatform.isAarch64;
 
       x86-strip-redundant-address-size = pkgs.stdenv.hostPlatform.isx86_64;
     },
