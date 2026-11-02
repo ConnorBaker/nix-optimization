@@ -9,9 +9,11 @@ lib.makeOverridable (
     withBOLTProfiling ? null,
     enableBOLT ? false,
     # TODO: Tweak, tune these; collect stats from profiling/optimization passes and do hyperparameter sweeps.
+    # BOLT's frame optimizer and register reassignment are x86-only (on AArch64, BOLT exits with "BOLT-ERROR: ... is
+    # specific to X86"); its other x86-only passes (e.g. shorten-instructions) skip themselves on AArch64.
     boltConfig ? {
-      frame-opt-rm-stores = true;
-      frame-opt = "all";
+      frame-opt-rm-stores = pkgs.stdenv.hostPlatform.isx86_64;
+      frame-opt = if pkgs.stdenv.hostPlatform.isx86_64 then "all" else "none";
 
       #   --assume-abi                                          - assume the ABI is never violated
       #   --eliminate-unreachable                               - eliminate unreachable code
@@ -30,7 +32,7 @@ lib.makeOverridable (
 
       plt = "all";
 
-      reg-reassign = true;
+      reg-reassign = pkgs.stdenv.hostPlatform.isx86_64;
       # With LLVM 22.1.8 BOLT, aggressive register reassignment miscompiles libnixfetchers.so (segfault in a static
       # initializer constructing a boost::regex, at startup).
       # use-aggr-reg-reassign = true;
